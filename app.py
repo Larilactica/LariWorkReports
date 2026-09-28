@@ -105,18 +105,16 @@ def obtener_tarifa_comuna(comuna_str):
             return nombre_m, tarifa
     return "OTRA / DESCONOCIDA", 0
 
-# Inicializar Base de Datos en Sesión
 if 'db_diaria' not in st.session_state:
     st.session_state['db_diaria'] = {}
 
-# Título Principal
 st.title("🚚 Suite de Reportes Operativos - Transportes Yáñez")
 
 tabs = st.tabs([
     "1. NS Diario (Easy & París)", 
-    "2. Reporte Comunas (Diario)", 
+    "2. Reporte Comunas (Rango/Diario)", 
     "3. Reporte Bonificación", 
-    "4. Cruce de Calces París", 
+    "4. Cruce de Calces París (Rango/Diario)", 
     "5. Consolidado Semanal/Rango"
 ])
 
@@ -154,27 +152,22 @@ with tabs[0]:
     if file_btk_yanez and st.button("Procesar NS Diario", key="b_proc_ns"):
         df_btk = pd.read_excel(file_btk_yanez) if file_btk_yanez.name.endswith(('.xlsx', '.xls')) else pd.read_csv(file_btk_yanez)
         
-        # Mapeo de columnas BTK Yáñez según especificación
-        # Col A: Ruta, Col B: Patente, Col C: Orden, Col D: Cliente, Col K: Estado, Col L: Subestado, Col M: Usuario Móvil, Col BU: FechaEntrega, Col BW: Comuna
-        col_cliente = df_btk.iloc[:, 3] # Col D
-        col_estado = df_btk.iloc[:, 10] # Col K
-        col_subestado = df_btk.iloc[:, 11] # Col L
-        col_patente = df_btk.iloc[:, 1] # Col B
+        col_cliente = df_btk.iloc[:, 3]
+        col_estado = df_btk.iloc[:, 10]
+        col_subestado = df_btk.iloc[:, 11]
+        col_patente = df_btk.iloc[:, 1]
         
         df_btk['CLIENTE_CLEAN'] = col_cliente.astype(str).str.upper().str.strip()
         df_btk['ESTADO_CLEAN'] = col_estado.astype(str).str.upper().str.strip()
         
-        # Filtrar solo EASY y PARIS
         df_filt = df_btk[df_btk['CLIENTE_CLEAN'].str.contains('EASY|PARIS|PARÍS', regex=True)].copy()
         
-        # NS Fecha Compromiso
         ns_fc_easy = (fc_easy_ent / fc_easy_tot * 100) if fc_easy_tot > 0 else 0
         ns_fc_paris = (fc_paris_ent / fc_paris_tot * 100) if fc_paris_tot > 0 else 0
         tot_fc_gen = fc_easy_tot + fc_paris_tot
         ent_fc_gen = fc_easy_ent + fc_paris_ent
         ns_fc_gen = (ent_fc_gen / tot_fc_gen * 100) if tot_fc_gen > 0 else 0
 
-        # NS Ácido (Beetrack del día)
         df_easy = df_filt[df_filt['CLIENTE_CLEAN'].str.contains('EASY')]
         df_paris = df_filt[df_filt['CLIENTE_CLEAN'].str.contains('PARIS|PARÍS')]
 
@@ -193,14 +186,12 @@ with tabs[0]:
         noent_acid_gen = tot_acid_gen - ent_acid_gen
         ns_acid_gen = (ent_acid_gen / tot_acid_gen * 100) if tot_acid_gen > 0 else 0
 
-        # Retiros
         ns_ret_easy = (ret_easy_ent / ret_easy_tot * 100) if ret_easy_tot > 0 else 0
         ns_ret_paris = (ret_paris_ent / ret_paris_tot * 100) if ret_paris_tot > 0 else 0
         tot_ret_gen = ret_easy_tot + ret_paris_tot
         ent_ret_gen = ret_easy_ent + ret_paris_ent
         ns_ret_gen = (ent_ret_gen / tot_ret_gen * 100) if tot_ret_gen > 0 else 0
 
-        # Flota
         q_moviles_gen = df_filt.iloc[:, 1].nunique()
         q_moviles_easy = df_easy.iloc[:, 1].nunique()
         q_moviles_paris = df_paris.iloc[:, 1].nunique()
@@ -229,7 +220,6 @@ with tabs[0]:
         subest_counts.columns = ['Sub-estado No Entrega', 'Cantidad']
         st.dataframe(subest_counts, use_container_width=True)
 
-        # Guardar en memoria de sesión
         f_key = fecha_ns.strftime("%Y-%m-%d")
         st.session_state['db_diaria'][f_key] = {
             'fecha': fecha_ns,
@@ -248,43 +238,45 @@ with tabs[0]:
         }
 
 # ==========================================
-# TAB 2: REPORTE COMUNAS (DIARIO)
+# TAB 2: REPORTE COMUNAS (RANGO O DIARIO)
 # ==========================================
 with tabs[1]:
-    st.header("2. Reporte de Comunas (Diario) por Columna")
+    st.header("2. Reporte de Comunas (Por Rango de Fechas o Día)")
     
+    col_c_r1, col_c_r2 = st.columns(2)
+    with col_c_r1:
+        f_com_ini = st.date_input("Fecha Inicio Comunas", datetime.date.today(), key="f_com_i")
+    with col_c_r2:
+        f_com_fin = st.date_input("Fecha Fin Comunas", datetime.date.today(), key="f_com_f")
+
     col_f1, col_f2 = st.columns(2)
     with col_f1:
-        f_comunas_fecha = st.date_input("Fecha Reporte Comunas", datetime.date.today(), key="f_com_d")
         file_hela = st.file_uploader("Cargar Reporte HELA (Excel/CSV)", type=["xlsx", "xls", "csv"], key="u_hela")
     with col_f2:
         file_btk_com = st.file_uploader("Cargar BTK YÁÑEZ para Comunas (Excel/CSV)", type=["xlsx", "xls", "csv"], key="u_btk_com")
 
-    if file_hela and file_btk_com and st.button("Generar Reporte Comunas", key="b_proc_com"):
+    if file_hela and file_btk_com and st.button("Generar Reporte Comunas (Rango)", key="b_proc_com"):
         df_h = pd.read_excel(file_hela) if file_hela.name.endswith(('.xlsx', '.xls')) else pd.read_csv(file_hela)
         df_b = pd.read_excel(file_btk_com) if file_btk_com.name.endswith(('.xlsx', '.xls')) else pd.read_csv(file_btk_com)
 
-        # Mapeo BTK Yáñez
-        # Col A: Ruta, Col B: Patente, Col C: Orden, Col D: Cliente, Col K: Estado, Col L: Subestado, Col M: Usuario, Col BU: FechaEntrega, Col BW: Comuna
         df_b['PATENTE_CLEAN'] = df_b.iloc[:, 1].astype(str).str.upper().str.strip()
         df_b['ESTADO_CLEAN'] = df_b.iloc[:, 10].astype(str).str.upper().str.strip()
         df_b['CLIENTE_CLEAN'] = df_b.iloc[:, 3].astype(str).str.upper().str.strip()
 
+        lbl_fecha_rango = f"{f_com_ini.strftime('%d/%m/%Y')} al {f_com_fin.strftime('%d/%m/%Y')}" if f_com_ini != f_com_fin else f_com_ini.strftime('%d/%m/%Y')
+
         filas_rep = []
         for idx, row in df_h.iterrows():
-            driver = row.iloc[0] # Col A HELA
-            patente = str(row.iloc[1]).upper().strip() # Col B HELA
-            nom_ruta = row.iloc[2] # Col C HELA
-            comunas_hela = str(row.iloc[3]) # Col D HELA
-            tot_puntos = row.iloc[4] # Col E HELA
-            compromisos = row.iloc[5] # Col F HELA
+            driver = row.iloc[0]
+            patente = str(row.iloc[1]).upper().strip()
+            nom_ruta = row.iloc[2]
+            comunas_hela = str(row.iloc[3])
+            tot_puntos = row.iloc[4]
+            compromisos = row.iloc[5]
 
-            # Filtrar BTK por patente
             df_b_pat = df_b[df_b['PATENTE_CLEAN'] == patente]
-            
             ruta_btk = df_b_pat.iloc[0, 0] if len(df_b_pat) > 0 else "SIN RUTA BTK"
             
-            # Buscar comuna más lejana
             lista_comunas = [c.strip() for c in comunas_hela.split(',')]
             max_val = -1
             comuna_lej = "CONCON"
@@ -294,7 +286,6 @@ with tabs[1]:
                     max_val = val_c
                     comuna_lej = nom_c
 
-            # Cruces y métricas BTK por patente
             p_ent = len(df_b_pat[df_b_pat['ESTADO_CLEAN'] == 'ENTREGADO'])
             p_noent = len(df_b_pat[df_b_pat['ESTADO_CLEAN'] != 'ENTREGADO'])
             
@@ -309,7 +300,7 @@ with tabs[1]:
             ns_pat = (p_ent / tot_btk_pat * 100) if tot_btk_pat > 0 else 0
 
             filas_rep.append({
-                'A: Fecha': f_comunas_fecha.strftime("%d/%m/%Y"),
+                'A: Fecha': lbl_fecha_rango,
                 'B: Driver': driver,
                 'C: Patente': patente,
                 'D: Nombre ruta': nom_ruta,
@@ -333,17 +324,17 @@ with tabs[1]:
         st.dataframe(df_res_comunas, use_container_width=True)
 
 # ==========================================
-# TAB 3: REPORTE BONIFICACIÓN
+# TAB 3: REPORTE BONIFICACIÓN (RANGO/DIARIO)
 # ==========================================
 with tabs[2]:
-    st.header("3. Reporte de Bonificación")
+    st.header("3. Reporte de Bonificación (Rango / Diario)")
     st.markdown("Generación automática de las 6 columnas derivadas del Reporte de Comunas.")
 
     if 'ultimo_rep_comunas' in st.session_state and not st.session_state['ultimo_rep_comunas'].empty:
         df_c_src = st.session_state['ultimo_rep_comunas']
         
         df_bonif = pd.DataFrame({
-            'Columna A (Fecha)': df_c_src['A: Fecha'],
+            'Columna A (Fecha/Rango)': df_c_src['A: Fecha'],
             'Columna B (Patente)': df_c_src['C: Patente'],
             'Columna C (Ruta)': df_c_src['F: Ruta BTK'],
             'Columna D (Valor)': df_c_src['J: Valor'],
@@ -356,13 +347,17 @@ with tabs[2]:
         st.warning("Primero debes procesar el Reporte de Comunas en la Pestaña 2 para generar este extracto.")
 
 # ==========================================
-# TAB 4: CRUCE DE CALCES PARÍS
+# TAB 4: CRUCE DE CALCES PARÍS (RANGO O DIARIO)
 # ==========================================
 with tabs[3]:
-    st.header("4. Reporte Cruce de Calces París (BTK Yáñez vs BTK París)")
+    st.header("4. Reporte Cruce de Calces París (Por Rango de Fechas o Día)")
     
-    fecha_calce = st.date_input("Fecha para el archivo de Calce", datetime.date.today(), key="f_calce")
-    
+    col_cal_r1, col_cal_r2 = st.columns(2)
+    with col_cal_r1:
+        f_cal_ini = st.date_input("Fecha Inicio Calce", datetime.date.today(), key="f_cal_i")
+    with col_cal_r2:
+        f_cal_fin = st.date_input("Fecha Fin Calce", datetime.date.today(), key="f_cal_f")
+
     col_cy, col_cp = st.columns(2)
     with col_cy:
         f_yanez_calce = st.file_uploader("Cargar BTK YÁÑEZ (Excel/CSV)", type=["xlsx", "xls", "csv"], key="u_y_c")
@@ -373,31 +368,30 @@ with tabs[3]:
         df_y = pd.read_excel(f_yanez_calce) if f_yanez_calce.name.endswith(('.xlsx', '.xls')) else pd.read_csv(f_yanez_calce)
         df_p = pd.read_excel(f_paris_calce) if f_paris_calce.name.endswith(('.xlsx', '.xls')) else pd.read_csv(f_paris_calce)
 
-        # Filtrar BTK Yáñez solo París
         df_y['CLIENTE_CLEAN'] = df_y.iloc[:, 3].astype(str).str.upper().str.strip()
         df_y_paris = df_y[df_y['CLIENTE_CLEAN'].str.contains('PARIS|PARÍS')].copy()
 
-        df_y_paris['ORDEN_CLEAN'] = df_y_paris.iloc[:, 2].astype(str).str.strip() # Col C
-        df_p['ORDEN_CLEAN'] = df_p.iloc[:, 2].astype(str).str.strip() # Col C BTK París
+        df_y_paris['ORDEN_CLEAN'] = df_y_paris.iloc[:, 2].astype(str).str.strip()
+        df_p['ORDEN_CLEAN'] = df_p.iloc[:, 2].astype(str).str.strip()
+
+        lbl_fecha_calce = f"{f_cal_ini.strftime('%d/%m/%Y')} al {f_cal_fin.strftime('%d/%m/%Y')}" if f_cal_ini != f_cal_fin else f_cal_ini.strftime('%d/%m/%Y')
 
         res_calce = []
         for idx, row_y in df_y_paris.iterrows():
             guia = row_y['ORDEN_CLEAN']
-            est_y = str(row_y.iloc[10]).strip() # Col K
-            sub_y = str(row_y.iloc[11]).strip() # Col L
-            f_comp = row_y.iloc[72] if len(row_y) > 72 else "" # Col BU (Fecha Compromiso)
+            est_y = str(row_y.iloc[10]).strip()
+            sub_y = str(row_y.iloc[11]).strip()
+            f_comp = row_y.iloc[72] if len(row_y) > 72 else ""
 
-            # Buscar en BTK París
             match_p = df_p[df_p['ORDEN_CLEAN'] == guia]
 
             if len(match_p) > 0:
-                est_p = str(match_p.iloc[0, 6]).strip() # Col G París
-                sub_p = str(match_p.iloc[0, 7]).strip() # Col H París
+                est_p = str(match_p.iloc[0, 6]).strip()
+                sub_p = str(match_p.iloc[0, 7]).strip()
             else:
                 est_p = "NO ENCONTRADO"
                 sub_p = "NO ENCONTRADO"
 
-            # Reglas de Coincidencia
             coincide = False
             sub_y_u = sub_y.upper()
             sub_p_u = sub_p.upper()
@@ -416,7 +410,7 @@ with tabs[3]:
                 coincide = True
 
             res_calce.append({
-                'A: Fecha': fecha_calce.strftime("%d/%m/%Y"),
+                'A: Fecha/Rango': lbl_fecha_calce,
                 'B: N° Pedido / Guía': guia,
                 'C: BTK TY Estado': est_y,
                 'D: BTK TY Sub Estado': sub_y,
@@ -428,7 +422,6 @@ with tabs[3]:
 
         df_res_calce = pd.DataFrame(res_calce)
         
-        # Resaltar no coincidencias
         def highlight_no_match(val):
             color = 'background-color: #ffcccc' if val == 'NO COINCIDE' else 'background-color: #d4edda'
             return color
@@ -495,7 +488,6 @@ with tabs[4]:
                 else:
                     st.info("No se registraron fallas o no entregas en los días seleccionados.")
             else:
-                st.warning("No hay registros en la base de datos para el rango de fechas seleccionado. Procesa primero los días en la Pestaña 1.")
+                st.warning("No hay registros en la base de datos para el rango de fechas seleccionado.")
         else:
-            st.warning("No hay datos cargados en la sesión actual. Carga al menos un día en el Reporte 1.")
-            
+            st.warning("No hay datos cargados en la sesión actual.")
