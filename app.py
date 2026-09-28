@@ -108,13 +108,19 @@ def obtener_tarifa_comuna(comuna_str):
 if 'db_diaria' not in st.session_state:
     st.session_state['db_diaria'] = {}
 
+if 'db_comunas' not in st.session_state:
+    st.session_state['db_comunas'] = {}  # {fecha_str: df_comunas}
+
+if 'db_calces' not in st.session_state:
+    st.session_state['db_calces'] = {}   # {fecha_str: df_calces}
+
 st.title("🚚 Suite de Reportes Operativos - Transportes Yáñez")
 
 tabs = st.tabs([
     "1. NS Diario (Easy & París)", 
-    "2. Reporte Comunas (Rango/Diario)", 
+    "2. Reporte Comunas", 
     "3. Reporte Bonificación", 
-    "4. Cruce de Calces París (Rango/Diario)", 
+    "4. Cruce de Calces París", 
     "5. Consolidado Semanal/Rango"
 ])
 
@@ -123,7 +129,7 @@ tabs = st.tabs([
 # ==========================================
 with tabs[0]:
     st.header("1. Reporte Nivel de Servicio (NS) Diario")
-    fecha_ns = st.date_input("Selecciona Fecha del Reporte", datetime.date.today(), key="f_ns")
+    fecha_ns = st.date_input("Fecha a la que corresponde este archivo BTK", datetime.date.today(), key="f_ns")
     
     file_btk_yanez = st.file_uploader("Cargar Archivo BTK YÁÑEZ (Excel/CSV)", type=["xlsx", "xls", "csv"], key="u_btk_main")
     
@@ -131,25 +137,25 @@ with tabs[0]:
     col_e, col_p = st.columns(2)
     with col_e:
         st.markdown("**EASY - Fecha Compromiso**")
-        fc_easy_tot = st.number_input("Totales FC Easy", min_value=0, value=0)
-        fc_easy_ent = st.number_input("Entregados FC Easy", min_value=0, value=0)
-        fc_easy_noent = st.number_input("No Entregados FC Easy", min_value=0, value=0)
+        fc_easy_tot = st.number_input("Totales FC Easy", min_value=0, value=0, key="fc_et")
+        fc_easy_ent = st.number_input("Entregados FC Easy", min_value=0, value=0, key="fc_ee")
+        fc_easy_noent = st.number_input("No Entregados FC Easy", min_value=0, value=0, key="fc_en")
         
         st.markdown("**EASY - Retiros**")
-        ret_easy_tot = st.number_input("Totales Retiros Easy", min_value=0, value=0)
-        ret_easy_ent = st.number_input("Entregados Retiros Easy", min_value=0, value=0)
+        ret_easy_tot = st.number_input("Totales Retiros Easy", min_value=0, value=0, key="rt_et")
+        ret_easy_ent = st.number_input("Entregados Retiros Easy", min_value=0, value=0, key="rt_ee")
         
     with col_p:
         st.markdown("**PARÍS - Fecha Compromiso**")
-        fc_paris_tot = st.number_input("Totales FC París", min_value=0, value=0)
-        fc_paris_ent = st.number_input("Entregados FC París", min_value=0, value=0)
-        fc_paris_noent = st.number_input("No Entregados FC París", min_value=0, value=0)
+        fc_paris_tot = st.number_input("Totales FC París", min_value=0, value=0, key="fc_pt")
+        fc_paris_ent = st.number_input("Entregados FC París", min_value=0, value=0, key="fc_pe")
+        fc_paris_noent = st.number_input("No Entregados FC París", min_value=0, value=0, key="fc_pn")
 
         st.markdown("**PARÍS - Retiros / Recogidos**")
-        ret_paris_tot = st.number_input("Totales Retiros París", min_value=0, value=0)
-        ret_paris_ent = st.number_input("Entregados Retiros París", min_value=0, value=0)
+        ret_paris_tot = st.number_input("Totales Retiros París", min_value=0, value=0, key="rt_pt")
+        ret_paris_ent = st.number_input("Entregados Retiros París", min_value=0, value=0, key="rt_pe")
 
-    if file_btk_yanez and st.button("Procesar NS Diario", key="b_proc_ns"):
+    if file_btk_yanez and st.button("Procesar y Guardar NS Diario", key="b_proc_ns"):
         df_btk = pd.read_excel(file_btk_yanez) if file_btk_yanez.name.endswith(('.xlsx', '.xls')) else pd.read_csv(file_btk_yanez)
         
         col_cliente = df_btk.iloc[:, 3]
@@ -236,18 +242,15 @@ with tabs[0]:
             'q_moviles_gen': q_moviles_gen,
             'df_noent': df_noent
         }
+        st.success(f"¡Día {fecha_ns.strftime('%d/%m/%Y')} guardado exitosamente en la memoria de sesión!")
 
 # ==========================================
-# TAB 2: REPORTE COMUNAS (RANGO O DIARIO)
+# TAB 2: REPORTE COMUNAS
 # ==========================================
 with tabs[1]:
-    st.header("2. Reporte de Comunas (Por Rango de Fechas o Día)")
+    st.header("2. Reporte de Comunas (Cargar archivo con su fecha)")
     
-    col_c_r1, col_c_r2 = st.columns(2)
-    with col_c_r1:
-        f_com_ini = st.date_input("Fecha Inicio Comunas", datetime.date.today(), key="f_com_i")
-    with col_c_r2:
-        f_com_fin = st.date_input("Fecha Fin Comunas", datetime.date.today(), key="f_com_f")
+    fecha_archivo_com = st.date_input("Fecha a la que corresponde este archivo de Comunas", datetime.date.today(), key="f_com_arch")
 
     col_f1, col_f2 = st.columns(2)
     with col_f1:
@@ -255,15 +258,13 @@ with tabs[1]:
     with col_f2:
         file_btk_com = st.file_uploader("Cargar BTK YÁÑEZ para Comunas (Excel/CSV)", type=["xlsx", "xls", "csv"], key="u_btk_com")
 
-    if file_hela and file_btk_com and st.button("Generar Reporte Comunas (Rango)", key="b_proc_com"):
+    if file_hela and file_btk_com and st.button("Procesar y Guardar Comunas del Día", key="b_proc_com"):
         df_h = pd.read_excel(file_hela) if file_hela.name.endswith(('.xlsx', '.xls')) else pd.read_csv(file_hela)
         df_b = pd.read_excel(file_btk_com) if file_btk_com.name.endswith(('.xlsx', '.xls')) else pd.read_csv(file_btk_com)
 
         df_b['PATENTE_CLEAN'] = df_b.iloc[:, 1].astype(str).str.upper().str.strip()
         df_b['ESTADO_CLEAN'] = df_b.iloc[:, 10].astype(str).str.upper().str.strip()
         df_b['CLIENTE_CLEAN'] = df_b.iloc[:, 3].astype(str).str.upper().str.strip()
-
-        lbl_fecha_rango = f"{f_com_ini.strftime('%d/%m/%Y')} al {f_com_fin.strftime('%d/%m/%Y')}" if f_com_ini != f_com_fin else f_com_ini.strftime('%d/%m/%Y')
 
         filas_rep = []
         for idx, row in df_h.iterrows():
@@ -300,7 +301,7 @@ with tabs[1]:
             ns_pat = (p_ent / tot_btk_pat * 100) if tot_btk_pat > 0 else 0
 
             filas_rep.append({
-                'A: Fecha': lbl_fecha_rango,
+                'A: Fecha': fecha_archivo_com.strftime("%d/%m/%Y"),
                 'B: Driver': driver,
                 'C: Patente': patente,
                 'D: Nombre ruta': nom_ruta,
@@ -316,25 +317,48 @@ with tabs[1]:
                 'N: No Entregados Easy BTK': len(df_b_easy) - p_ent_easy,
                 'O: Entregados París BTK': p_ent_paris,
                 'P: No Entregados París BTK': p_noent_paris,
-                'Q: NS Patente (%)': round(ns_pat, 2)
+                'Q: NS Patente (%)': round(ns_pat, 2),
+                '_fecha_obj': fecha_archivo_com
             })
 
         df_res_comunas = pd.DataFrame(filas_rep)
-        st.session_state['ultimo_rep_comunas'] = df_res_comunas
-        st.dataframe(df_res_comunas, use_container_width=True)
+        f_key_com = fecha_archivo_com.strftime("%Y-%m-%d")
+        st.session_state['db_comunas'][f_key_com] = df_res_comunas
+        st.success(f"¡Reporte de Comunas del {fecha_archivo_com.strftime('%d/%m/%Y')} procesado y guardado con éxito!")
+
+    # Visualizar acumulado por rango de fechas
+    st.markdown("---")
+    st.subheader("🔍 Consultar Comunas por Rango de Fechas")
+    col_rc1, col_rc2 = st.columns(2)
+    with col_rc1:
+        f_ini_c = st.date_input("Desde Fecha", datetime.date.today(), key="fi_c")
+    with col_rc2:
+        f_fin_c = st.date_input("Hasta Fecha", datetime.date.today(), key="ff_c")
+
+    if st.button("Mostrar Reporte Comunas del Rango", key="b_show_com"):
+        if st.session_state['db_comunas']:
+            dfs_match = [df for k, df in st.session_state['db_comunas'].items() if f_ini_c <= datetime.datetime.strptime(k, "%Y-%m-%d").date() <= f_fin_c]
+            if dfs_match:
+                df_final_com = pd.concat(dfs_match, ignore_index=True)
+                st.session_state['ultimo_rep_comunas'] = df_final_com.drop(columns=['_fecha_obj'])
+                st.dataframe(st.session_state['ultimo_rep_comunas'], use_container_width=True)
+            else:
+                st.warning("No hay registros de comunas en el rango de fechas seleccionado.")
+        else:
+            st.info("Aún no has procesado ningún archivo de comunas en esta sesión.")
 
 # ==========================================
-# TAB 3: REPORTE BONIFICACIÓN (RANGO/DIARIO)
+# TAB 3: REPORTE BONIFICACIÓN
 # ==========================================
 with tabs[2]:
-    st.header("3. Reporte de Bonificación (Rango / Diario)")
+    st.header("3. Reporte de Bonificación (Basado en el Rango Consultado)")
     st.markdown("Generación automática de las 6 columnas derivadas del Reporte de Comunas.")
 
     if 'ultimo_rep_comunas' in st.session_state and not st.session_state['ultimo_rep_comunas'].empty:
         df_c_src = st.session_state['ultimo_rep_comunas']
         
         df_bonif = pd.DataFrame({
-            'Columna A (Fecha/Rango)': df_c_src['A: Fecha'],
+            'Columna A (Fecha)': df_c_src['A: Fecha'],
             'Columna B (Patente)': df_c_src['C: Patente'],
             'Columna C (Ruta)': df_c_src['F: Ruta BTK'],
             'Columna D (Valor)': df_c_src['J: Valor'],
@@ -344,19 +368,15 @@ with tabs[2]:
         
         st.dataframe(df_bonif, use_container_width=True)
     else:
-        st.warning("Primero debes procesar el Reporte de Comunas en la Pestaña 2 para generar este extracto.")
+        st.warning("Primero debes generar y consultar el Reporte de Comunas por Rango en la Pestaña 2.")
 
 # ==========================================
-# TAB 4: CRUCE DE CALCES PARÍS (RANGO O DIARIO)
+# TAB 4: CRUCE DE CALCES PARÍS
 # ==========================================
 with tabs[3]:
-    st.header("4. Reporte Cruce de Calces París (Por Rango de Fechas o Día)")
+    st.header("4. Reporte Cruce de Calces París (Cargar archivo con su fecha)")
     
-    col_cal_r1, col_cal_r2 = st.columns(2)
-    with col_cal_r1:
-        f_cal_ini = st.date_input("Fecha Inicio Calce", datetime.date.today(), key="f_cal_i")
-    with col_cal_r2:
-        f_cal_fin = st.date_input("Fecha Fin Calce", datetime.date.today(), key="f_cal_f")
+    fecha_archivo_calce = st.date_input("Fecha a la que corresponde este archivo de Calce", datetime.date.today(), key="f_calce_arch")
 
     col_cy, col_cp = st.columns(2)
     with col_cy:
@@ -364,7 +384,7 @@ with tabs[3]:
     with col_cp:
         f_paris_calce = st.file_uploader("Cargar BTK PARÍS (Excel/CSV)", type=["xlsx", "xls", "csv"], key="u_p_c")
 
-    if f_yanez_calce and f_paris_calce and st.button("Ejecutar Cruce de Calces", key="b_proc_calce"):
+    if f_yanez_calce and f_paris_calce and st.button("Procesar y Guardar Calces del Día", key="b_proc_calce"):
         df_y = pd.read_excel(f_yanez_calce) if f_yanez_calce.name.endswith(('.xlsx', '.xls')) else pd.read_csv(f_yanez_calce)
         df_p = pd.read_excel(f_paris_calce) if f_paris_calce.name.endswith(('.xlsx', '.xls')) else pd.read_csv(f_paris_calce)
 
@@ -373,8 +393,6 @@ with tabs[3]:
 
         df_y_paris['ORDEN_CLEAN'] = df_y_paris.iloc[:, 2].astype(str).str.strip()
         df_p['ORDEN_CLEAN'] = df_p.iloc[:, 2].astype(str).str.strip()
-
-        lbl_fecha_calce = f"{f_cal_ini.strftime('%d/%m/%Y')} al {f_cal_fin.strftime('%d/%m/%Y')}" if f_cal_ini != f_cal_fin else f_cal_ini.strftime('%d/%m/%Y')
 
         res_calce = []
         for idx, row_y in df_y_paris.iterrows():
@@ -410,23 +428,46 @@ with tabs[3]:
                 coincide = True
 
             res_calce.append({
-                'A: Fecha/Rango': lbl_fecha_calce,
+                'A: Fecha': fecha_archivo_calce.strftime("%d/%m/%Y"),
                 'B: N° Pedido / Guía': guia,
                 'C: BTK TY Estado': est_y,
                 'D: BTK TY Sub Estado': sub_y,
                 'E: BTK París Estado': est_p,
                 'F: BTK París Sub Estado': sub_p,
                 'G: Estado Cruce': 'COINCIDE' if coincide else 'NO COINCIDE',
-                'H: Fecha Compromiso': f_comp
+                'H: Fecha Compromiso': f_comp,
+                '_fecha_obj': fecha_archivo_calce
             })
 
         df_res_calce = pd.DataFrame(res_calce)
-        
-        def highlight_no_match(val):
-            color = 'background-color: #ffcccc' if val == 'NO COINCIDE' else 'background-color: #d4edda'
-            return color
+        f_key_calce = fecha_archivo_calce.strftime("%Y-%m-%d")
+        st.session_state['db_calces'][f_key_calce] = df_res_calce
+        st.success(f"¡Cruce de Calces del {fecha_archivo_calce.strftime('%d/%m/%Y')} guardado con éxito!")
 
-        st.dataframe(df_res_calce.style.map(highlight_no_match, subset=['G: Estado Cruce']), use_container_width=True)
+    # Consultar Calces por Rango
+    st.markdown("---")
+    st.subheader("🔍 Consultar Cruce de Calces por Rango de Fechas")
+    col_rcal1, col_rcal2 = st.columns(2)
+    with col_rcal1:
+        f_ini_cal = st.date_input("Desde Fecha", datetime.date.today(), key="fi_cal")
+    with col_rcal2:
+        f_fin_cal = st.date_input("Hasta Fecha", datetime.date.today(), key="ff_cal")
+
+    if st.button("Mostrar Calces del Rango", key="b_show_cal"):
+        if st.session_state['db_calces']:
+            dfs_match_cal = [df for k, df in st.session_state['db_calces'].items() if f_ini_cal <= datetime.datetime.strptime(k, "%Y-%m-%d").date() <= f_fin_cal]
+            if dfs_match_cal:
+                df_final_cal = pd.concat(dfs_match_cal, ignore_index=True).drop(columns=['_fecha_obj'])
+                
+                def highlight_no_match(val):
+                    color = 'background-color: #ffcccc' if val == 'NO COINCIDE' else 'background-color: #d4edda'
+                    return color
+
+                st.dataframe(df_final_cal.style.map(highlight_no_match, subset=['G: Estado Cruce']), use_container_width=True)
+            else:
+                st.warning("No hay registros de calces en el rango de fechas seleccionado.")
+        else:
+            st.info("Aún no has procesado ningún archivo de calces en esta sesión.")
 
 # ==========================================
 # TAB 5: CONSOLIDADO SEMANAL / RANGO
@@ -436,9 +477,9 @@ with tabs[4]:
     
     col_r1, col_r2 = st.columns(2)
     with col_r1:
-        f_inicio = st.date_input("Fecha Inicio (Rango/Semana)", datetime.date.today() - datetime.timedelta(days=6))
+        f_inicio = st.date_input("Fecha Inicio (Rango/Semana)", datetime.date.today() - datetime.timedelta(days=6), key="fi_sem")
     with col_r2:
-        f_fin = st.date_input("Fecha Fin (Rango/Semana)", datetime.date.today())
+        f_fin = st.date_input("Fecha Fin (Rango/Semana)", datetime.date.today(), key="ff_sem")
 
     if st.button("Generar Reporte Semanal", key="b_proc_sem"):
         if 'db_diaria' in st.session_state and st.session_state['db_diaria']:
