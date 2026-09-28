@@ -15,7 +15,7 @@ st.set_page_config(
 # ==========================================
 # SISTEMA DE ACCESO Y CONTRASEÑA
 # ==========================================
-PASSWORD_SECRETA = "yanez2026"
+PASSWORD_SECRETA = "Larilaxia"
 
 def check_password():
     if "password_correct" not in st.session_state:
