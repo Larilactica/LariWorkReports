@@ -15,8 +15,8 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="🐾 Gestión de Naves espaciales",
-page_icon="🛸",
+    page_title="page_title="🐾 Gestión de Naves espaciales",
+page_icon="🛸",",
     layout="wide",
 )
 
@@ -1628,8 +1628,26 @@ def cargar_fc(f_ini, f_fin):
             return None
 
         out.append({"fecha": f, "tot": int(m.get("fc_tot", 0)), "ent": int(m.get("fc_ent", 0)),
-                    "no": int(m.get("fc_no", 0)), "easy": par("fc_easy"), "paris": par("fc_paris")})
+                    "no": int(m.get("fc_no", 0)), "easy": par("fc_easy"), "paris": par("fc_paris"),
+                    "origen": "Mensual"})
     return out
+
+
+def cargar_fc_mes(f_ini, f_fin):
+    """Datos de compromiso del rango. Lo ingresado en la pestaña mensual manda; los días que no tienen nada se
+    completan con lo que ya ingresaste en el NS diario (pestaña 1), para no tener que ingresarlo dos veces."""
+    regs = cargar_fc(f_ini, f_fin)
+    tienen = {r["fecha"] for r in regs}
+    for f, m, _ in cargar("ns", f_ini, f_fin):
+        if f in tienen:
+            continue
+        c = calcular_ns(m)
+        if c["fc_gen_tot"]:
+            regs.append({"fecha": f, "tot": c["fc_gen_tot"], "ent": c["fc_gen_ent"], "no": c["fc_gen_no"],
+                         "easy": (c["fc_easy_tot"], c["fc_easy_ent"], c["fc_easy_no"]),
+                         "paris": (c["fc_paris_tot"], c["fc_paris_ent"], c["fc_paris_no"]),
+                         "origen": "NS diario"})
+    return sorted(regs, key=lambda r: r["fecha"])
 
 
 def borrar_fc(fecha):
@@ -1690,7 +1708,7 @@ def excel_mensual(dfs, regs, anio, mes):
             "NS Easy (%)": mes_c["easy"], "NS París (%)": mes_c["paris"]}])
         filas = []
         for r in sorted(regs, key=lambda r: r["fecha"]):
-            fila = {"Fecha": r["fecha"].strftime("%d/%m/%Y")}
+            fila = {"Fecha": r["fecha"].strftime("%d/%m/%Y"), "Origen": r.get("origen", "Mensual")}
             for nombre, clave in (("Easy", "easy"), ("París", "paris")):
                 t, e, n = r[clave] if r[clave] is not None else (None, None, None)
                 fila.update({f"{nombre} totales": t, f"{nombre} entregados": e, f"{nombre} no entregados": n})
@@ -1821,17 +1839,17 @@ def login_html():
 .astro-gato{left:5vw;top:26vh;width:min(19vw,250px);animation:flotar 6.5s ease-in-out infinite}
 .astro-perro{right:5vw;top:34vh;width:min(19vw,250px);animation:flotar2 7.5s ease-in-out infinite}
 .login-titulo{position:relative;z-index:2;text-align:center;margin:8vh 0 .2rem}
-.login-titulo h1{font-size:clamp(1.25rem,3.6vw,2.6rem);font-weight:800;margin:0;color:#e9f3ff;text-shadow:0 0 14px rgba(120,185,255,.85),0 0 34px rgba(60,120,255,.55);letter-spacing:.3px}
-.login-titulo p{margin:.35rem 0 0;color:#a9c8ff;font-size:1.02rem}
+.login-titulo h1{font-size:clamp(1.7rem,5.2vw,3.6rem);line-height:1.15;font-weight:800;margin:0;color:#e9f3ff;text-shadow:0 0 14px rgba(120,185,255,.85),0 0 34px rgba(60,120,255,.55);letter-spacing:.3px}
+.login-titulo p{margin:.5rem 0 0;color:#b9d3ff;font-size:clamp(1.05rem,1.8vw,1.35rem);letter-spacing:.6px}
 .login-sub{position:relative;z-index:2;text-align:center;color:#8fb2f0;margin:.2rem 0 1rem;font-size:.92rem}
-.block-container{max-width:540px !important;margin-left:auto !important;margin-right:auto !important;position:relative;z-index:2;padding-top:2rem !important}
-[data-testid="stForm"]{background:rgba(7,18,52,.58) !important;border:1px solid rgba(130,190,255,.5) !important;border-radius:20px !important;padding:22px 24px !important;box-shadow:0 0 44px rgba(60,130,255,.28),inset 0 0 34px rgba(90,160,255,.09);backdrop-filter:blur(7px)}
+.block-container{max-width:900px !important;margin-left:auto !important;margin-right:auto !important;position:relative;z-index:2;padding-top:2rem !important}
+[data-testid="stForm"]{box-sizing:border-box;width:100%;max-width:440px;margin:0 auto !important;background:rgba(7,18,52,.58) !important;border:1px solid rgba(130,190,255,.5) !important;border-radius:20px !important;padding:22px 24px !important;box-shadow:0 0 44px rgba(60,130,255,.28),inset 0 0 34px rgba(90,160,255,.09);backdrop-filter:blur(7px)}
 [data-testid="stForm"] label p,[data-testid="stForm"] label{color:#d5e6ff !important;font-weight:600}
 [data-testid="stForm"] input{background:rgba(6,14,40,.85) !important;color:#9fe9ff !important;border:1px solid #3c63d8 !important;border-radius:12px !important}
 [data-testid="stForm"] input:focus{border-color:#67e3ff !important;box-shadow:0 0 14px rgba(103,227,255,.6) !important}
 [data-testid="stForm"] button{width:100%;background:linear-gradient(135deg,#6a5cf0 0%,#3a6bff 55%,#22c5e8 100%) !important;color:#fff !important;font-weight:700 !important;border:none !important;border-radius:12px !important;padding:.55rem 1rem !important;box-shadow:0 0 18px rgba(80,140,255,.55);transition:all .25s ease}
 [data-testid="stForm"] button:hover{transform:translateY(-2px) scale(1.015);box-shadow:0 0 28px rgba(103,227,255,.8)}
-[data-testid="stAlert"]{position:relative;z-index:2}
+[data-testid="stAlert"]{box-sizing:border-box;position:relative;z-index:2;width:100%;max-width:440px;margin:0 auto}
 @media (max-width:900px){.astro-gato{left:2vw;top:1.5vh;width:72px}.astro-perro{right:2vw;top:1.5vh;width:72px}.login-titulo{margin-top:11vh}}
 </style>"""
     css = css.replace("ESTRELLAS_A", estrellas_a).replace("ESTRELLAS_B", estrellas_b)
@@ -1857,7 +1875,7 @@ def login_html():
 <div class="nube" style="left:22%;bottom:12%;width:22%;height:3%"></div></div>"""
     astros = f'<div class="astro astro-gato">{gato}</div><div class="astro astro-perro">{perro}</div>'
     titulo = """
-<div class="login-titulo"><h1>🚀 Suite de Reportes Operativos</h1><p>Transportes Yáñez</p></div>
+<div class="login-titulo"><h1>🚀 Welcome Captain Larissa</h1><p>Gestión de Naves Espaciales</p></div>
 <div class="login-sub">Ingresa la clave de acceso para despegar 🐾</div>"""
     cuerpo = estrella + tierra + astros + titulo
     # una sola línea: Streamlit interpreta las líneas en blanco o con sangría como texto, no como HTML
@@ -2635,7 +2653,7 @@ with tabs[6]:
 
     res_mes = cargar("mensual", primer_m, primer_m)
     meta_m, dfs_m = (res_mes[0][1], res_mes[0][2]) if res_mes else ({}, {})
-    regs_m = cargar_fc(primer_m, ultimo_m)
+    regs_m = cargar_fc_mes(primer_m, ultimo_m)
     res_cal = cargar("calce_mensual", primer_m, primer_m)
     meta_cal, dfs_cal = (res_cal[0][1], res_cal[0][2]) if res_cal else ({}, {})
     sub = st.tabs(["Comunas del mes", "NS Compromiso", "NS Ácido", "Órdenes por patente", "Descargar todo",
@@ -2676,7 +2694,12 @@ with tabs[6]:
         pre_e = pre_p = (0, 0, 0)
         origen_pre = None
         if dia_fc in ya and ya[dia_fc]["easy"] is not None:
-            pre_e, pre_p, origen_pre = ya[dia_fc]["easy"], ya[dia_fc]["paris"], "guardado"
+            pre_e, pre_p = ya[dia_fc]["easy"], ya[dia_fc]["paris"]
+            if ya[dia_fc].get("origen") == "NS diario":
+                origen_pre = "ns_diario"
+                st.caption("Este día toma los datos del NS diario (pestaña 1). Si los guardas aquí, se usará lo de aquí.")
+            else:
+                origen_pre = "guardado"
         elif dia_fc in ya:
             origen_pre = "general"
             st.warning(f"Este día solo tiene un total general guardado ({ya[dia_fc]['tot']} pedidos). "
@@ -2718,7 +2741,8 @@ with tabs[6]:
             guardar_fc(dia_fc, val_e, val_p)
             st.success(f"Guardado el {dia_fc:%d/%m/%Y}.")
             st.rerun()
-        if dia_fc in ya and b2c.button("🗑️ Eliminar este día", key=f"mfc_d_{dia_fc}"):
+        if dia_fc in ya and ya[dia_fc].get("origen") != "NS diario" and b2c.button(
+                "🗑️ Eliminar este día", key=f"mfc_d_{dia_fc}"):
             borrar_fc(dia_fc)
             st.rerun()
 
@@ -2746,7 +2770,7 @@ with tabs[6]:
             with st.expander("Ver los datos ingresados"):
                 filas_v = []
                 for r in sorted(regs_m, key=lambda r: r["fecha"]):
-                    fila = {"Fecha": r["fecha"].strftime("%d/%m/%Y")}
+                    fila = {"Fecha": r["fecha"].strftime("%d/%m/%Y"), "Origen": r.get("origen", "Mensual")}
                     for nombre, clave in (("Easy", "easy"), ("París", "paris")):
                         t, e, n = r[clave] if r[clave] is not None else ("—", "—", "—")
                         fila.update({f"{nombre} totales": t, f"{nombre} entregados": e, f"{nombre} no entregados": n})
