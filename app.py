@@ -15,8 +15,8 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Gestión de Operaciones - Transportes Yáñez",
-    page_icon="🚚",
+    page_title="🐾 Gestión de Naves espaciales - Hello Captain Larissa",
+    page_icon="🛸",
     layout="wide",
 )
 
