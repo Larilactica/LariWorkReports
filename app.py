@@ -15,7 +15,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="🐾 Gestión de Naves espaciales - Hello Captain Larissa",
+    page_title="🐾 Gestión de Naves espaciales",
     page_icon="🛸",
     layout="wide",
 )
@@ -2246,7 +2246,7 @@ def mostrar_semanal(f_ini, f_fin):
 # =====================================================================
 # PÁGINA
 # =====================================================================
-st.title("🚚 Suite de Reportes Operativos - Transportes Yáñez")
+st.title("🚚 Suite de Reportes Operativos - Hello,Captain Larissa")
 if "aviso_limpieza" in st.session_state:
     _corte, _na, _nr = st.session_state["aviso_limpieza"]
     st.info(f"🧹 Limpieza automática: se borró todo lo anterior al {_corte:%d/%m/%Y} "
