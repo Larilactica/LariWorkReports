@@ -15,9 +15,9 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="page_title="🐾 Gestión de Naves espaciales",
-page_icon="🛸",",
-    layout="wide",
+    page_title="Gestión de Naves espaciales",
+    page_icon="🛸",
+    layout="wide"
 )
 
 # =====================================================================
