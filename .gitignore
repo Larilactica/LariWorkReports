@@ -1,0 +1,5 @@
+reportes_yanez.db
+   datos_yanez.db
+   .streamlit/secrets.toml
+   __pycache__/
+   *.pyc
