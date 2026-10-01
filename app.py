@@ -15,8 +15,8 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-page_title="Gestión de Naves espaciales",
-page_icon="🛸",
+    page_title="Gestión de naves espaciales",
+    page_icon="🛸",
     layout="wide",
 )
 
@@ -465,6 +465,18 @@ def _migrar_comunas(d):
     return d
 
 
+def _enteros_donde_corresponde(d):
+    """Las columnas numéricas cuyos valores son todos enteros (con huecos) se muestran sin decimales: 13, no 13.000000."""
+    d = d.copy()
+    for c in d.columns:
+        if _es_pct(c) or not pd.api.types.is_numeric_dtype(d[c]) or pd.api.types.is_bool_dtype(d[c]):
+            continue
+        v = d[c].dropna()
+        if len(v) and (v % 1 == 0).all():
+            d[c] = d[c].astype("Int64")
+    return d
+
+
 def _cargar_sin_cache(tipo, f_ini, f_fin):
     out = []
     for f, payload in STORE.cargar_resultados(tipo, f_ini.isoformat(), f_fin.isoformat()):
@@ -472,7 +484,7 @@ def _cargar_sin_cache(tipo, f_ini, f_fin):
                for k, v in payload.get("dfs", {}).items()}
         for k in ("reporte", "comunas"):
             if k in dfs:
-                dfs[k] = _migrar_comunas(dfs[k])
+                dfs[k] = _enteros_donde_corresponde(_migrar_comunas(dfs[k]))
         out.append((datetime.date.fromisoformat(f), payload.get("meta", {}), dfs))
     return out
 
