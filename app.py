@@ -16,7 +16,7 @@ import streamlit as st
 
 st.set_page_config(
     page_title="Gestión de Naves espaciales",
-    page_icon="🛸",
+    page_icon="🛸"
     layout="wide",
 )
 
@@ -920,7 +920,7 @@ def _clave_comuna(nombre):
     return r[0] if r else limpiar_texto(nombre)
 
 
-def procesar_comunas(hela, b, fecha):
+def procesar_comunas(hela, b, fecha, nombres_pat=None):
     """Cruza Hela con BTK. El BTK manda. Cada ruta tiene una sola patente.
     - Si el Hela trae Patente, cada fila se une con el BTK por patente.
     - Si no la trae, cada fila del Hela es una ruta (A, B, C… en el orden del archivo). Se une con el BTK por
@@ -928,6 +928,8 @@ def procesar_comunas(hela, b, fecha):
       con esa letra. Desde ahí, puntos, entregados, compromisos, comunas y valor salen de TODOS los pedidos que
       llevó esa patente, aunque algunos vengan con la letra de otra ruta.
     La comuna pagada sale de los pedidos del BTK; las comunas que no estaban en Hela se agregan.
+    nombres_pat (opcional, ver nombres_habituales): si viene, el driver que se muestra es el de la patente que hizo
+    la ruta ese día, no el que traiga una etiqueta suelta de un pedido que cambió de ruta.
     Solo se consideran pedidos de clientes Easy y París."""
     attrs_b = dict(b.attrs)
     b = b[b["ES_EASY"] | b["ES_PARIS"]]
@@ -954,7 +956,7 @@ def procesar_comunas(hela, b, fecha):
             driver = usuario_btk
 
         # Comunas: las del Hela + las que aparecen en el BTK y no estaban en Hela
-        partes_hela = _partes_comunas(comunas_hela)
+        partes_hela = list({_clave_comuna(x): x for x in reversed(_partes_comunas(comunas_hela))}.values())[::-1]
         claves_h = {_clave_comuna(x) for x in partes_hela}
         comunas_btk = list(dict.fromkeys(bp.loc[bp["COMUNA"].ne(""), "COMUNA"]))
         extras = [c for c in comunas_btk if _clave_comuna(c) not in claves_h]
@@ -1027,25 +1029,68 @@ def procesar_comunas(hela, b, fecha):
         }
 
     def etiqueta_conductor(bp, letra=None):
+        if nombres_pat and len(bp):
+            nombre = nombre_del_dia(nombres_pat.get(bp["PAT_KEY"].iloc[0]), bp)
+            if nombre:
+                return f"RUTA {letra} - {nombre}" if letra else nombre
         c = bp["CONDUCTOR"][bp["CONDUCTOR"].ne("")]
         if letra:
             c = bp.loc[bp["LETRA"].eq(letra) & bp["CONDUCTOR"].ne(""), "CONDUCTOR"]
         return c.value_counts().index[0] if len(c) else ""
 
     solo_btk = []
+    avisos_rutas = []
     if por_patente:
-        claves_hela = set()
+        entradas, por_clave, sin_patente, agrupadas = [], {}, 0, []
+        k = 0
+
+        def suma(a, b_):
+            a, b_ = pd.to_numeric(a, errors="coerce"), pd.to_numeric(b_, errors="coerce")
+            return b_ if pd.isna(a) else (a if pd.isna(b_) else a + b_)
+
         for _, row in h.iterrows():
+            if (pd.isna(row["NOMBRE_RUTA"]) and pd.isna(row["COMUNAS"]) and pd.isna(row["PUNTOS"])
+                    and pd.isna(row["PATENTE"])):
+                continue
+            letra = letra_excel(k)  # la ruta A, B, C… sigue el orden de las filas del Hela
+            k += 1
             pat_raw = row["PATENTE"]
             if pd.isna(pat_raw) or not str(pat_raw).strip():
+                sin_patente += 1
+                entradas.append({"clave": None, "letras": [letra], "driver": row["DRIVER"], "nombres": [row["NOMBRE_RUTA"]],
+                                 "comunas": [row["COMUNAS"]], "puntos": row["PUNTOS"], "comp": row["COMPROMISOS"],
+                                 "patente": ""})
                 continue
             patente = str(pat_raw).upper().strip()
             clave = clave_patente(patente)
-            claves_hela.add(clave)
-            bp = b[b["PAT_KEY"] == clave]
+            if clave in por_clave:
+                # una patente con más de una ruta el mismo día (p. ej. una «ruta adicional»): se suman en una sola fila
+                e_ = por_clave[clave]
+                e_["letras"].append(letra)
+                e_["nombres"].append(row["NOMBRE_RUTA"])
+                e_["comunas"].append(row["COMUNAS"])
+                e_["puntos"] = suma(e_["puntos"], row["PUNTOS"])
+                e_["comp"] = suma(e_["comp"], row["COMPROMISOS"])
+                agrupadas.append(f"{patente} ({' + '.join(e_['letras'])})")
+            else:
+                por_clave[clave] = {"clave": clave, "letras": [letra], "driver": row["DRIVER"],
+                                    "nombres": [row["NOMBRE_RUTA"]], "comunas": [row["COMUNAS"]],
+                                    "puntos": row["PUNTOS"], "comp": row["COMPROMISOS"], "patente": patente}
+                entradas.append(por_clave[clave])
+        claves_hela = set(por_clave)
+        for e_ in entradas:
+            bp = b[b["PAT_KEY"] == e_["clave"]] if e_["clave"] else b.iloc[0:0]
             origen = ORIGEN_OK if len(bp) else ORIGEN_SOLO_HELA
-            filas.append(fila_ruta(bp, patente, row["DRIVER"], row["NOMBRE_RUTA"], row["COMUNAS"],
-                                   row["PUNTOS"], row["COMPROMISOS"], origen))
+            patente = bp["PATENTE"].iloc[0] if len(bp) else e_["patente"]  # como viene en el BTK
+            letra = " + ".join(e_["letras"])
+            driver = e_["driver"]
+            if (driver is None or pd.isna(driver) or not str(driver).strip()) and len(bp):
+                driver = etiqueta_conductor(bp, e_["letras"][0])
+            comunas = " - ".join(str(c_) for c_ in e_["comunas"] if not pd.isna(c_))
+            nombres = " + ".join(str(n_) for n_ in e_["nombres"] if not pd.isna(n_))
+            n_letra = int(b["LETRA"].isin(e_["letras"]).sum())
+            filas.append(fila_ruta(bp, patente, driver, nombres, comunas, e_["puntos"], e_["comp"], origen, letra,
+                                   n_letra=n_letra))
         for clave, g in b[b["PAT_KEY"].ne("")].groupby("PAT_KEY", sort=False):
             if clave in claves_hela:
                 continue
@@ -1053,6 +1098,11 @@ def procesar_comunas(hela, b, fecha):
             solo_btk.append(patente)
             filas.append(fila_ruta(g, patente, etiqueta_conductor(g), "(solo en BTK)", "", None, None,
                                    ORIGEN_SOLO_BTK))
+        if sin_patente:
+            avisos_rutas.append(f"{sin_patente} ruta(s) del Hela sin patente (quedan como «Solo Hela»).")
+        if agrupadas:
+            avisos_rutas.append("Patente con más de una ruta el mismo día (se sumaron en una sola fila): "
+                                + ", ".join(dict.fromkeys(agrupadas)))
     else:
         avisos_hela = [a for a in avisos_hela if "Patente" not in a and "Driver" not in a]
         if len(b) and not (b["LETRA"] != "").any():
@@ -1109,7 +1159,8 @@ def procesar_comunas(hela, b, fecha):
     info = {"modo_union": "patente" if por_patente else "letra",
             "patentes_solo_btk": solo_btk,
             "patentes_solo_hela": df.loc[df["AB: Origen"] == ORIGEN_SOLO_HELA, "C: Patente"].tolist() if len(df) else [],
-            "mapeo_hela": mapa_a_filas(h.attrs["mapeo"]), "avisos_hela": avisos_hela,
+            "mapeo_hela": mapa_a_filas(h.attrs["mapeo"]), "avisos_hela": avisos_hela + avisos_rutas,
+            "avisos_rutas": avisos_rutas,
             "mapeo_btk": mapa_a_filas(attrs_b.get("mapeo", {})), "avisos_btk": list(attrs_b.get("avisos", []))}
     return df, info
 
@@ -1616,6 +1667,46 @@ def procesar_calce_mensual(y, p_raw, anio, mes):
                   "calce_diagnostico": diag, "calce_combinaciones": comb}
 
 
+def _nombre_conductor(etiqueta):
+    """«RUTA A - Raul» -> «Raul»."""
+    return re.sub(r"(?i)^\s*ruta\s+[A-Z]{1,2}\s*-\s*", "", str(etiqueta)).strip()
+
+
+def nombres_habituales(b):
+    """Para cada patente, los nombres de driver que usa en el período:
+    {clave de patente: [(clave del nombre, nombre, proporción de sus pedidos, días en que fue el nombre principal)]}
+    de mayor a menor proporción."""
+    e = b[(b["ES_EASY"] | b["ES_PARIS"]) & b["PAT_KEY"].ne("") & b["CONDUCTOR"].ne("")].copy()
+    e["NOMBRE"] = e["CONDUCTOR"].map(_nombre_conductor)
+    e = e[e["NOMBRE"].ne("") & ~e["NOMBRE"].str.upper().str.contains("REINGRESO")]
+    e["CLAVE"] = e["NOMBRE"].map(limpiar_texto)
+    # nombre principal de cada patente en cada día
+    por_dia = e.groupby(["PAT_KEY", "FECHA", "CLAVE"]).size().reset_index(name="n")
+    principal = por_dia.sort_values("n", ascending=False).drop_duplicates(["PAT_KEY", "FECHA"])
+    dias_principal = principal.groupby(["PAT_KEY", "CLAVE"]).size()
+    out = {}
+    for pk, g_ in e.groupby("PAT_KEY"):
+        cuenta = g_["CLAVE"].value_counts()
+        out[pk] = [(clave, g_.loc[g_["CLAVE"] == clave, "NOMBRE"].value_counts().index[0].title(), n / cuenta.sum(),
+                    int(dias_principal.get((pk, clave), 0))) for clave, n in cuenta.items()]
+    return out
+
+
+def nombre_del_dia(tabla_pat, bp, min_dias=2):
+    """Driver de una patente en un día. Entre los nombres que esa patente maneja de verdad (fueron el nombre
+    principal al menos `min_dias` días del mes), se elige el que más aparece ese día. Si ninguno aparece, se usa el
+    más habitual del mes. Así una etiqueta suelta de otro driver (pedidos que cambiaron de ruta) no define quién
+    manejó."""
+    if not tabla_pat:
+        return None
+    validos = {c: nombre for c, nombre, _, dias in tabla_pat if dias >= min_dias}
+    dia = bp["CONDUCTOR"][bp["CONDUCTOR"].ne("")].map(_nombre_conductor).map(limpiar_texto).value_counts()
+    for clave in dia.index:
+        if clave in validos:
+            return validos[clave]
+    return tabla_pat[0][1]
+
+
 def comunas_mensual(hela, b, anio, mes):
     """Reporte de comunas de todo el mes: aplica el cruce Hela + BTK día por día."""
     h = preparar_hela(hela)
@@ -1633,10 +1724,12 @@ def comunas_mensual(hela, b, anio, mes):
     if sin_btk:
         avisos.append("Días con Hela y sin pedidos en el BTK (sus rutas salen como «Solo Hela»): "
                       + ", ".join(f"{d:%d/%m}" for d in sin_btk))
+    nombres = nombres_habituales(b)
     for dia in sorted(dias_hela | dias_btk):
         try:
-            df_dia, _ = procesar_comunas(hela[(f_hela == dia).values], b[b["FECHA"] == dia], dia)
+            df_dia, info_dia = procesar_comunas(hela[(f_hela == dia).values], b[b["FECHA"] == dia], dia, nombres)
             piezas.append(df_dia)
+            avisos.extend(f"{dia:%d/%m}: {a}" for a in info_dia.get("avisos_rutas", []))
         except Exception as e:  # noqa: BLE001
             avisos.append(f"{dia:%d/%m}: no se pudo procesar ({e})")
     df = pd.concat(piezas, ignore_index=True) if piezas else pd.DataFrame()
