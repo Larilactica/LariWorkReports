@@ -4,6 +4,7 @@ import base64
 import gzip
 import io
 import json
+import numbers
 import os
 import random
 import re
@@ -15,7 +16,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Gestión de naves espaciales",
+    page_title="Gestión de Naves espaciales",
     page_icon="🛸",
     layout="wide",
 )
@@ -1429,9 +1430,11 @@ def _con_porcentajes(df):
     return d, cols, filas
 
 
-def a_excel(hojas):
+def a_excel(hojas, graficos=None):
     """hojas = {'Nombre': DataFrame}. Encabezado en negrita, filtros, primera fila fija, ancho automático y
-    los porcentajes con formato de % (las columnas con «(%)» o que empiezan con «%»)."""
+    los porcentajes con formato de % (las columnas con «(%)» o que empiezan con «%»).
+    graficos = {"Nombre de hoja": {"titulo", "x": columna de fechas, "series": [columnas], "colores": ["RRGGBB"]}}
+    agrega un gráfico de líneas a la derecha de la tabla."""
     from openpyxl.styles import Font, PatternFill
 
     if not hojas:
@@ -1465,7 +1468,40 @@ def a_excel(hojas):
             for col in ws.columns:
                 largo = max((len(str(c.value)) for c in col if c.value is not None), default=0)
                 ws.column_dimensions[col[0].column_letter].width = min(largo + 2, 45)
+            if graficos and nombre in graficos and ws.max_row > 1:
+                _grafico_lineas_excel(ws, d, graficos[nombre])
     return buf.getvalue()
+
+
+def _grafico_lineas_excel(ws, d, g):
+    from openpyxl.chart import LineChart, Reference
+    from openpyxl.utils import get_column_letter
+
+    cols = list(d.columns)
+    ch = LineChart()
+    ch.title = g.get("titulo", "")
+    ch.height, ch.width = 9.5, 26
+    ch.x_axis.delete = False
+    ch.y_axis.delete = False
+    ch.y_axis.number_format = "0%"
+    vals = [v for c in g["series"] for v in d[c].dropna()]
+    if vals:
+        ch.y_axis.scaling.min = max(0.0, (int(min(vals) * 100 - 5) // 10) / 10)
+        ch.y_axis.scaling.max = 1.0
+    for i, c in enumerate(g["series"]):
+        ch.add_data(Reference(ws, min_col=cols.index(c) + 1, min_row=1, max_row=ws.max_row), titles_from_data=True)
+        serie = ch.series[i]
+        serie.smooth = False
+        if i < len(g.get("colores", [])):
+            serie.graphicalProperties.line.solidFill = g["colores"][i]
+        serie.graphicalProperties.line.width = 19000
+    ch.set_categories(Reference(ws, min_col=cols.index(g["x"]) + 1, min_row=2, max_row=ws.max_row))
+    ws.add_chart(ch, f"{get_column_letter(ws.max_column + 2)}2")
+
+
+GRAFICO_ACIDO_EXCEL = {"NS Ácido día": {"titulo": "NS Ácido por día", "x": "Fecha",
+                                        "series": ["NS Easy (%)", "NS París (%)", "NS Ácido (%)"],
+                                        "colores": ["1F5FBF", "7FC4FF", "FF2B2B"]}}
 
 
 def excel_completo(f_ini, f_fin):
@@ -1862,22 +1898,7 @@ def excel_mensual(dfs, regs, anio, mes):
         bon = df_bonificacion(com)
         hojas["Bonificación del mes"] = bon
         hojas["Bonificación por patente"] = bonificacion_por_patente(bon)
-    dia_c, sem_c, mes_c = tablas_ns_compromiso(regs)
-    if mes_c is not None:
-        hojas["NS Compromiso día"] = dia_c
-        hojas["NS Compromiso semana"] = sem_c
-        hojas["NS Compromiso mes"] = pd.DataFrame([{
-            "Mes": f"{MESES[mes - 1].capitalize()} {anio}", "NS Compromiso (%)": mes_c["general"],
-            "NS Easy (%)": mes_c["easy"], "NS París (%)": mes_c["paris"]}])
-        filas = []
-        for r in sorted(regs, key=lambda r: r["fecha"]):
-            fila = {"Fecha": r["fecha"].strftime("%d/%m/%Y"), "Origen": r.get("origen", "Mensual")}
-            for nombre, clave in (("Easy", "easy"), ("París", "paris")):
-                t, e, n = r[clave] if r[clave] is not None else (None, None, None)
-                fila.update({f"{nombre} totales": t, f"{nombre} entregados": e, f"{nombre} no entregados": n})
-            fila.update({"General totales": r["tot"], "General entregados": r["ent"], "General no entregados": r["no"]})
-            filas.append(fila)
-        hojas["Datos compromiso ingresados"] = pd.DataFrame(filas)
+    hojas.update(hojas_compromiso(regs, anio, mes))
     for clave, nombre in (("acido_dia", "NS Ácido día"), ("acido_semana", "NS Ácido semana"),
                           ("acido_mes", "NS Ácido mes"), ("patentes", "Órdenes y NS por patente"),
                           ("subestados_noent", "Sub-estados no entregados"),
@@ -1886,7 +1907,289 @@ def excel_mensual(dfs, regs, anio, mes):
         d = dfs.get(clave)
         if d is not None and not d.empty:
             hojas[nombre] = d
-    return a_excel(hojas) if hojas else None
+    return a_excel(hojas, GRAFICO_ACIDO_EXCEL) if hojas else None
+
+
+# --- PDF de los reportes mensuales ---
+def _celda_pdf(col, v):
+    try:
+        if v is None or pd.isna(v):
+            return "—"
+    except (TypeError, ValueError):
+        pass
+    if _es_pct(col):
+        try:
+            return fmt_pct(float(v))
+        except (TypeError, ValueError):
+            return str(v)
+    if isinstance(v, bool):
+        return "Sí" if v else "No"
+    if isinstance(v, numbers.Integral) or (isinstance(v, numbers.Real) and float(v).is_integer()):
+        return f"{int(v):,}".replace(",", ".")
+    if isinstance(v, numbers.Real):
+        return f"{float(v):.2f}".replace(".", ",")
+    return str(v)
+
+
+def _grafico_lineas_pdf(g, ancho):
+    """Gráfico de líneas (una línea por serie) dibujado con reportlab, sin librerías extra.
+    g = {"df": DataFrame, "x": columna de fechas, "series": [columnas en %], "colores": [#hex], "etiquetas": [...]}"""
+    from reportlab.graphics.charts.legends import Legend
+    from reportlab.graphics.charts.linecharts import HorizontalLineChart
+    from reportlab.graphics.shapes import Drawing
+    from reportlab.graphics.widgets.markers import makeMarker
+    from reportlab.lib import colors
+    from reportlab.lib.units import cm
+
+    d = g["df"]
+    cats = [str(x)[:5] for x in d[g["x"]]]
+    datos = [[None if pd.isna(v) else float(v) for v in d[c]] for c in g["series"]]
+    todos = [v for fila in datos for v in fila if v is not None]
+    ymin = max(0, int((min(todos) - 5) // 10 * 10)) if todos else 0
+    alto = 6.4 * cm
+    dib = Drawing(ancho, alto)
+    lc = HorizontalLineChart()
+    lc.x, lc.y, lc.width, lc.height = 34, 46, ancho - 48, alto - 56
+    lc.data = datos
+    lc.joinedLines = 1
+    lc.categoryAxis.categoryNames = cats
+    lc.categoryAxis.labels.angle = 90
+    lc.categoryAxis.labels.boxAnchor = "e"
+    lc.categoryAxis.labels.fontSize = 6.5
+    lc.categoryAxis.labels.dy = -2
+    lc.categoryAxis.strokeColor = colors.HexColor("#9AA7BF")
+    lc.valueAxis.valueMin, lc.valueAxis.valueMax = ymin, 100
+    lc.valueAxis.valueStep = 10
+    lc.valueAxis.labelTextFormat = "%d%%"
+    lc.valueAxis.labels.fontSize = 7
+    lc.valueAxis.strokeColor = colors.HexColor("#9AA7BF")
+    lc.valueAxis.visibleGrid = 1
+    lc.valueAxis.gridStrokeColor = colors.HexColor("#E3E8F0")
+    for i, col in enumerate(g["colores"]):
+        lc.lines[i].strokeColor = colors.HexColor(col)
+        lc.lines[i].strokeWidth = 1.6
+        lc.lines[i].symbol = makeMarker("Circle")
+        lc.lines[i].symbol.size = 3
+        lc.lines[i].symbol.fillColor = colors.HexColor(col)
+        lc.lines[i].symbol.strokeColor = colors.HexColor(col)
+    dib.add(lc)
+    leyenda = Legend()
+    leyenda.x, leyenda.y = ancho / 2 - 110, 8
+    leyenda.alignment = "right"
+    leyenda.columnMaximum = 1
+    leyenda.deltax, leyenda.deltay = 95, 0
+    leyenda.dxTextSpace = 5
+    leyenda.fontSize = 8
+    leyenda.colorNamePairs = [(colors.HexColor(c), n) for c, n in zip(g["colores"], g["etiquetas"])]
+    dib.add(leyenda)
+    return dib
+
+
+def pdf_reporte(titulo, secciones):
+    """PDF con tablas. secciones = [{"titulo": str, "metricas": [(etiqueta, valor)], "df": DataFrame, "nota": str}].
+    Si alguna tabla es ancha, la hoja sale horizontal."""
+    from xml.sax.saxutils import escape
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import cm
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    ancho_max = max([len(sec["df"].columns) for sec in secciones if sec.get("df") is not None] or [0])
+    pagina = landscape(A4) if ancho_max > 7 else A4
+    margen = 1.5 * cm
+    disp = pagina[0] - 2 * margen
+    buf = io.BytesIO()
+
+    def pie(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#6B7A99"))
+        canvas.drawString(margen, 0.8 * cm, titulo)
+        canvas.drawRightString(pagina[0] - margen, 0.8 * cm, f"Página {doc.page}")
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(buf, pagesize=pagina, leftMargin=margen, rightMargin=margen, topMargin=1.4 * cm,
+                            bottomMargin=1.6 * cm, title=titulo, author="Transportes Yáñez")
+    est = getSampleStyleSheet()
+    s_tit = ParagraphStyle("t", parent=est["Title"], alignment=0, fontSize=16, spaceAfter=2)
+    s_sec = ParagraphStyle("s", parent=est["Heading2"], fontSize=12, spaceBefore=10, spaceAfter=4)
+    s_nota = ParagraphStyle("n", parent=est["Normal"], fontSize=8, textColor=colors.HexColor("#6B7A99"))
+    historia = [Paragraph(escape(titulo), s_tit)]
+
+    for sec in secciones:
+        bloque = [Paragraph(escape(sec["titulo"]), s_sec)]
+        if sec.get("metricas"):
+            etiq = [Paragraph(f'<font size="8" color="#6B7A99">{escape(str(e))}</font>', est["Normal"])
+                    for e, _ in sec["metricas"]]
+            vals = [Paragraph(f'<font size="15"><b>{escape(str(v))}</b></font>', est["Normal"])
+                    for _, v in sec["metricas"]]
+            m = Table([etiq, vals], colWidths=[min(5.2 * cm, disp / len(etiq))] * len(etiq), hAlign="LEFT")
+            m.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#B8C0CC")),
+                                   ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#DDE3EC")),
+                                   ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F4F7FB")),
+                                   ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]))
+            bloque.append(m)
+        if sec.get("grafico") is not None:
+            bloque.append(_grafico_lineas_pdf(sec["grafico"], disp))
+        df = sec.get("df")
+        if df is not None and not df.empty:
+            cols = list(df.columns)
+            fuente = 8 if len(cols) <= 8 else 7
+            f_h = ParagraphStyle("h", parent=est["Normal"], fontName="Helvetica-Bold", fontSize=fuente,
+                                 leading=fuente + 1.5)
+            filas = [[_celda_pdf(c, v) for c, v in zip(cols, fila)] for fila in df.itertuples(index=False, name=None)]
+            anch = []
+            for i, c in enumerate(cols):
+                w_h = max(stringWidth(w_, "Helvetica-Bold", fuente) for w_ in (str(c).split() or [""]))
+                w_b = max([stringWidth(f[i], "Helvetica", fuente) for f in filas] or [0])
+                anch.append(max(w_h, w_b) + 10)
+            if sum(anch) > disp:
+                anch = [a * disp / sum(anch) for a in anch]
+            datos = [[Paragraph(escape(str(c)), f_h) for c in cols]] + filas
+            t = Table(datos, colWidths=anch, repeatRows=1, hAlign="LEFT")
+            num = [i for i, c in enumerate(cols) if pd.api.types.is_numeric_dtype(df[c])]
+            estilo = [("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E9EDF2")),
+                      ("FONTNAME", (0, 1), (-1, -1), "Helvetica"), ("FONTSIZE", (0, 1), (-1, -1), fuente),
+                      ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#B8C0CC")),
+                      ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F6F8FC")]),
+                      ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                      ("TOPPADDING", (0, 0), (-1, -1), 2.5 if len(df) < 20 else 1.4),
+                      ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5 if len(df) < 20 else 1.4),
+                      ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4)]
+            estilo += [("ALIGN", (i, 1), (i, -1), "RIGHT") for i in num]
+            t.setStyle(TableStyle(estilo))
+            bloque += [Spacer(1, 4), t]
+        if sec.get("nota"):
+            bloque += [Spacer(1, 3), Paragraph(escape(sec["nota"]), s_nota)]
+        historia.append(KeepTogether(bloque) if (df is None or len(df) < 14) else bloque[0])
+        if df is not None and len(df) >= 14:
+            historia += bloque[1:]
+    doc.build(historia, onFirstPage=pie, onLaterPages=pie)
+    return buf.getvalue()
+
+
+def _nombre_mes(anio, mes):
+    return f"{MESES[mes - 1].capitalize()} {anio}"
+
+
+def _secciones_compromiso(regs, anio, mes):
+    dia_c, sem_c, mes_c = tablas_ns_compromiso(regs)
+    if mes_c is None:
+        return []
+    f = lambda x: fmt_pct(x) if x == x else "—"  # noqa: E731
+    return [
+        {"titulo": "NS Compromiso del mes",
+         "metricas": [("General", f(mes_c["general"])), ("Easy", f(mes_c["easy"])), ("París", f(mes_c["paris"]))],
+         "nota": "NS compromiso = pedidos con fecha de entrega límite ese día que se entregaron / pedidos con fecha "
+                 "de entrega límite ese día. Semana de lunes a domingo, con los días que tienen datos."},
+        {"titulo": "Por semana", "df": sem_c},
+        {"titulo": "Por día", "df": dia_c},
+    ]
+
+
+def _secciones_acido(dfs):
+    if "acido_dia" not in dfs or dfs["acido_dia"].empty:
+        return []
+    m = dfs["acido_mes"].iloc[0]
+    return [
+        {"titulo": "NS Ácido del mes",
+         "metricas": [("NS Ácido", fmt_pct(m["NS Ácido (%)"])), ("Órdenes totales", _celda_pdf("x", m["Órdenes totales"])),
+                      ("Entregadas / recogidas", _celda_pdf("x", m["Entregadas / recogidas"])),
+                      ("No entregadas", _celda_pdf("x", m["No entregadas"]))],
+         "nota": "NS ácido = órdenes entregadas o recogidas / órdenes totales (todas las órdenes de Easy y París)."},
+        {"titulo": "Evolución diaria",
+         "grafico": {"df": dfs["acido_dia"], "x": "Fecha", "series": ["NS Easy (%)", "NS París (%)", "NS Ácido (%)"],
+                     "etiquetas": ["NS Easy (%)", "NS París (%)", "NS Ácido (%)"],
+                     "colores": ["#1F5FBF", "#7FC4FF", "#FF2B2B"]}},
+        {"titulo": "Por semana", "df": dfs["acido_semana"]},
+        {"titulo": "Por día", "df": dfs["acido_dia"]},
+    ]
+
+
+def pdf_ns_compromiso(regs, anio, mes):
+    return pdf_reporte(f"NS Compromiso | {_nombre_mes(anio, mes)}", _secciones_compromiso(regs, anio, mes))
+
+
+def _secciones_extra_acido(dfs):
+    """Lo que acompaña al NS ácido: el nivel de servicio de cada patente y los sub-estados de no entrega."""
+    secs = []
+    if dfs.get("patentes") is not None and not dfs["patentes"].empty:
+        secs.append({"titulo": "NS de cada patente en el mes", "df": dfs["patentes"],
+                     "nota": "% entrega del mes = órdenes entregadas o recogidas / órdenes totales de la patente."})
+    if dfs.get("subestados_noent") is not None and not dfs["subestados_noent"].empty:
+        secs.append({"titulo": "Sub-estados de las órdenes no entregadas", "df": dfs["subestados_noent"]})
+    return secs
+
+
+def pdf_ns_acido(dfs, anio, mes):
+    return pdf_reporte(f"NS Ácido | {_nombre_mes(anio, mes)}", _secciones_acido(dfs) + _secciones_extra_acido(dfs))
+
+
+def hojas_acido(dfs):
+    """Hojas de Excel del NS ácido: por día, por semana, del mes, por patente y sub-estados de no entrega."""
+    hojas = {"NS Ácido día": dfs["acido_dia"], "NS Ácido semana": dfs["acido_semana"], "NS Ácido mes": dfs["acido_mes"]}
+    if dfs.get("patentes") is not None and not dfs["patentes"].empty:
+        hojas["NS por patente del mes"] = dfs["patentes"]
+    if dfs.get("subestados_noent") is not None and not dfs["subestados_noent"].empty:
+        hojas["Sub-estados no entregados"] = dfs["subestados_noent"]
+    return hojas
+
+
+def pdf_patentes(dfs, anio, mes):
+    return pdf_reporte(f"NS por patente | {_nombre_mes(anio, mes)}", [
+        {"titulo": "Nivel de servicio de cada patente en el mes", "df": dfs["patentes"],
+         "nota": "% entrega del mes = órdenes entregadas o recogidas / órdenes totales de la patente (solo Easy y París)."}])
+
+
+def pdf_subestados(dfs, anio, mes):
+    se = dfs["subestados_noent"]
+    return pdf_reporte(f"Sub-estados de no entrega | {_nombre_mes(anio, mes)}", [
+        {"titulo": "Órdenes no entregadas, por sub-estado",
+         "metricas": [("Total no entregadas", _celda_pdf("x", int(se["Cantidad"].sum())))], "df": se}])
+
+
+def pdf_bonificacion(com, anio, mes):
+    bon = df_bonificacion(com)
+    por_pat = bonificacion_por_patente(bon)
+    return pdf_reporte(f"Bonificación | {_nombre_mes(anio, mes)}", [
+        {"titulo": "Resumen del mes",
+         "metricas": [("Total bonificación", "$ " + _celda_pdf("x", int(bon["D: Valor"].sum()))),
+                      ("Rutas con pago", _celda_pdf("x", len(bon))), ("Patentes", _celda_pdf("x", len(por_pat)))]},
+        {"titulo": "Total por patente", "df": por_pat}])
+
+
+def pdf_mensual_completo(dfs, regs, anio, mes):
+    """Un solo PDF con NS compromiso, NS ácido, NS por patente, sub-estados de no entrega y bonificación."""
+    secs = _secciones_compromiso(regs, anio, mes) + _secciones_acido(dfs) + _secciones_extra_acido(dfs)
+    if dfs.get("comunas") is not None and not dfs["comunas"].empty:
+        bon = df_bonificacion(dfs["comunas"])
+        secs.append({"titulo": "Bonificación del mes por patente",
+                     "metricas": [("Total bonificación", "$ " + _celda_pdf("x", int(bon["D: Valor"].sum()))),
+                                  ("Rutas con pago", _celda_pdf("x", len(bon)))],
+                     "df": bonificacion_por_patente(bon)})
+    return pdf_reporte(f"Reporte mensual | {_nombre_mes(anio, mes)}", secs)
+
+
+def hojas_compromiso(regs, anio, mes):
+    """Hojas de Excel del NS compromiso: por día, por semana, del mes y los datos ingresados."""
+    dia_c, sem_c, mes_c = tablas_ns_compromiso(regs)
+    if mes_c is None:
+        return {}
+    hojas = {"NS Compromiso día": dia_c, "NS Compromiso semana": sem_c,
+             "NS Compromiso mes": pd.DataFrame([{"Mes": _nombre_mes(anio, mes), "NS Compromiso (%)": mes_c["general"],
+                                                "NS Easy (%)": mes_c["easy"], "NS París (%)": mes_c["paris"]}])}
+    filas = []
+    for r in sorted(regs, key=lambda r: r["fecha"]):
+        fila = {"Fecha": r["fecha"].strftime("%d/%m/%Y"), "Origen": r.get("origen", "Mensual")}
+        for nombre, clave in (("Easy", "easy"), ("París", "paris")):
+            t, e, n = r[clave] if r[clave] is not None else (None, None, None)
+            fila.update({f"{nombre} totales": t, f"{nombre} entregados": e, f"{nombre} no entregados": n})
+        fila.update({"General totales": r["tot"], "General entregados": r["ent"], "General no entregados": r["no"]})
+        filas.append(fila)
+    hojas["Datos compromiso ingresados"] = pd.DataFrame(filas)
+    return hojas
 
 
 # ===================== INTERFAZ =====================
@@ -2850,9 +3153,13 @@ with tabs[6]:
                        "Bonificación por patente": bonificacion_por_patente(bon_m)}
             if not pat_c.empty:
                 hojas_c["NS por patente del mes"] = pat_c
-            st.download_button("📥 Descargar comunas y bonificación del mes (Excel)",
-                               a_excel(hojas_c),
-                               file_name=f"Comunas_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_com_mes")
+            dm1, dm2 = st.columns(2)
+            dm1.download_button("📥 Descargar comunas y bonificación del mes (Excel)",
+                                a_excel(hojas_c),
+                                file_name=f"Comunas_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_com_mes")
+            dm2.download_button("📄 Descargar bonificación del mes en PDF", pdf_bonificacion(com_m, anio_m, mes_m),
+                                file_name=f"Bonificacion_{anio_m}-{mes_m:02d}.pdf", mime="application/pdf",
+                                key="dl_bon_pdf")
 
     # ----- NS Compromiso (ingreso manual) -----
     with sub[1]:
@@ -2931,6 +3238,15 @@ with tabs[6]:
             mostrar_df(sem_c)
             st.markdown("**Por día**")
             mostrar_df(dia_c)
+            st.caption("Para descargar usa los botones de abajo (Excel o PDF). El ícono pequeño de la tabla baja un "
+                       "CSV que Excel en español abre todo en una columna.")
+            dc1, dc2 = st.columns(2)
+            dc1.download_button("📥 Descargar NS Compromiso en Excel",
+                                a_excel(hojas_compromiso(regs_m, anio_m, mes_m)),
+                                file_name=f"NS_Compromiso_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_comp_xlsx")
+            dc2.download_button("📄 Descargar NS Compromiso en PDF", pdf_ns_compromiso(regs_m, anio_m, mes_m),
+                                file_name=f"NS_Compromiso_{anio_m}-{mes_m:02d}.pdf", mime="application/pdf",
+                                key="dl_comp_pdf")
             dias_btk = set()
             if "acido_dia" in dfs_m and not dfs_m["acido_dia"].empty:
                 dias_btk = {datetime.datetime.strptime(x, "%d/%m/%Y").date() for x in dfs_m["acido_dia"]["Fecha"]}
@@ -2965,10 +3281,13 @@ with tabs[6]:
             st.markdown("**Por día**")
             mostrar_df(ac_dia)
             st.line_chart(ac_dia.set_index("Fecha")[["NS Ácido (%)", "NS Easy (%)", "NS París (%)"]])
-            st.download_button("📥 Descargar NS Ácido en Excel",
-                               a_excel({"NS Ácido día": ac_dia, "NS Ácido semana": dfs_m["acido_semana"],
-                                        "NS Ácido mes": dfs_m["acido_mes"]}),
-                               file_name=f"NS_Acido_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_acido_mes")
+            da1, da2 = st.columns(2)
+            da1.download_button("📥 Descargar NS Ácido en Excel",
+                                a_excel(hojas_acido(dfs_m), GRAFICO_ACIDO_EXCEL),
+                                file_name=f"NS_Acido_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_acido_mes")
+            da2.download_button("📄 Descargar NS Ácido en PDF", pdf_ns_acido(dfs_m, anio_m, mes_m),
+                                file_name=f"NS_Acido_{anio_m}-{mes_m:02d}.pdf", mime="application/pdf",
+                                key="dl_acido_pdf")
 
     # ----- Órdenes por patente -----
     with sub[3]:
@@ -2979,23 +3298,35 @@ with tabs[6]:
             mostrar_df(pat_m)
             st.caption("% entrega del mes = órdenes entregadas o recogidas / órdenes totales de la patente en el mes "
                        "(solo Easy y París). NS Easy y NS París usan el mismo cálculo con los pedidos de cada cliente.")
-            st.download_button("📥 Descargar NS por patente en Excel", a_excel({"NS por patente del mes": pat_m}),
-                               file_name=f"Ordenes_por_patente_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_pat_mes")
+            dp1, dp2 = st.columns(2)
+            dp1.download_button("📥 Descargar NS por patente en Excel", a_excel({"NS por patente del mes": pat_m}),
+                                file_name=f"Ordenes_por_patente_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_pat_mes")
+            dp2.download_button("📄 Descargar NS por patente en PDF", pdf_patentes(dfs_m, anio_m, mes_m),
+                                file_name=f"NS_por_patente_{anio_m}-{mes_m:02d}.pdf", mime="application/pdf",
+                                key="dl_pat_pdf")
 
     # ----- Descargar todo -----
     with sub[4]:
-        st.markdown("Un solo Excel con todos los reportes del mes: comunas, bonificación, NS compromiso, "
-                    "NS ácido y órdenes por patente.")
-        if st.button("Preparar Excel del mes", key="b_xls_mes"):
+        st.markdown("Un solo Excel (y un PDF) con todos los reportes del mes: comunas, bonificación, NS compromiso, "
+                    "NS ácido, NS por patente y sub-estados de no entrega.")
+        if st.button("Preparar reportes del mes", key="b_xls_mes"):
             xls_m = excel_mensual({**dfs_m, **dfs_cal}, regs_m, anio_m, mes_m)
             if xls_m is None:
                 st.warning("No hay datos para este mes.")
                 st.session_state.pop("excel_mes", None)
+                st.session_state.pop("pdf_mes", None)
             else:
                 st.session_state["excel_mes"] = (xls_m, f"Reporte_Mensual_{anio_m}-{mes_m:02d}.xlsx")
+                st.session_state["pdf_mes"] = (pdf_mensual_completo(dfs_m, regs_m, anio_m, mes_m),
+                                               f"Reporte_Mensual_{anio_m}-{mes_m:02d}.pdf")
         if "excel_mes" in st.session_state:
-            st.download_button("📥 Descargar reporte mensual completo", st.session_state["excel_mes"][0],
-                               file_name=st.session_state["excel_mes"][1], mime=XLSX, key="dl_mes_todo")
+            dt1, dt2 = st.columns(2)
+            dt1.download_button("📥 Descargar reporte mensual completo (Excel)", st.session_state["excel_mes"][0],
+                                file_name=st.session_state["excel_mes"][1], mime=XLSX, key="dl_mes_todo")
+            if "pdf_mes" in st.session_state:
+                dt2.download_button("📄 Descargar reporte mensual completo (PDF)", st.session_state["pdf_mes"][0],
+                                    file_name=st.session_state["pdf_mes"][1], mime="application/pdf",
+                                    key="dl_mes_todo_pdf")
 
     # ----- Sub-estados de no entregados del mes (al final de la página) -----
     st.markdown("---")
@@ -3009,10 +3340,14 @@ with tabs[6]:
         else:
             mostrar_df(se_no)
             st.caption(f"Total de órdenes no entregadas: {int(se_no['Cantidad'].sum())} (solo Easy y París)")
-            st.download_button("📥 Descargar sub-estados de no entrega en Excel",
-                               a_excel({"Sub-estados no entregados": se_no}),
-                               file_name=f"Subestados_no_entrega_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX,
-                               key="dl_subest_mes")
+            ds1, ds2 = st.columns(2)
+            ds1.download_button("📥 Descargar sub-estados de no entrega en Excel",
+                                a_excel({"Sub-estados no entregados": se_no}),
+                                file_name=f"Subestados_no_entrega_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX,
+                                key="dl_subest_mes")
+            ds2.download_button("📄 Descargar sub-estados de no entrega en PDF", pdf_subestados(dfs_m, anio_m, mes_m),
+                                file_name=f"Subestados_no_entrega_{anio_m}-{mes_m:02d}.pdf", mime="application/pdf",
+                                key="dl_subest_pdf")
 
     # ----- Calce París del mes -----
     with sub[5]:
