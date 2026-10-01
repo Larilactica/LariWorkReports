@@ -15,9 +15,9 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Gestión de Naves espaciales",
-    page_icon="🛸",
-    layout="wide"
+    page_title="Gestión de Operaciones - Transportes Yáñez",
+    page_icon="🚚",
+    layout="wide",
 )
 
 # =====================================================================
@@ -452,11 +452,27 @@ def guardar_resultado(tipo, fecha, meta=None, dfs=None):
     _invalidar()
 
 
+ETIQUETAS_COMUNAS_ANTIGUAS = {'S: Coincide puntos': 'U: Coincide puntos', 'T: Compromisos BTK': 'V: Compromisos BTK', 'U: Coincide compromisos': 'W: Coincide compromisos', 'V: Usuario móvil BTK': 'X: Usuario móvil BTK', 'W: Comuna lejana según Hela': 'Y: Comuna lejana según Hela', 'X: Coincide con Hela': 'Z: Coincide con Hela', 'Y: Comunas no reconocidas': 'AA: Comunas no reconocidas', 'Z: Origen': 'AB: Origen', 'AA: Dif. puntos (BTK − Hela)': 'AC: Dif. puntos (BTK − Hela)', 'AB: Dif. compromisos (BTK − Hela)': 'AD: Dif. compromisos (BTK − Hela)', 'AC: Comunas agregadas desde BTK': 'AE: Comunas agregadas desde BTK', 'AD: Valor según Hela': 'AF: Valor según Hela', 'AE: Letra de ruta': 'AG: Letra de ruta', 'AF: Pedidos de otras rutas en esta patente': 'AH: Pedidos de otras rutas en esta patente', 'AG: Pedidos de esta ruta llevados por otra patente': 'AI: Pedidos de esta ruta llevados por otra patente', 'AH: Pedidos con la letra de esta ruta (BTK)': 'AJ: Pedidos con la letra de esta ruta (BTK)'}
+
+
+def _migrar_comunas(d):
+    """Pone al día el reporte de comunas guardado con el formato anterior (sin «Pedidos Easy / París»)."""
+    if "S: Coincide puntos" in d.columns:
+        d = d.rename(columns=ETIQUETAS_COMUNAS_ANTIGUAS)
+        pos = list(d.columns).index("R: Puntos BTK") + 1
+        d.insert(pos, "S: Pedidos Easy", d["M: Entregados Easy BTK"] + d["N: No Entregados Easy BTK"])
+        d.insert(pos + 1, "T: Pedidos París", d["O: Entregados París BTK"] + d["P: No Entregados París BTK"])
+    return d
+
+
 def _cargar_sin_cache(tipo, f_ini, f_fin):
     out = []
     for f, payload in STORE.cargar_resultados(tipo, f_ini.isoformat(), f_fin.isoformat()):
         dfs = {k: pd.read_json(io.StringIO(json.dumps(v)), orient="split", dtype=False, convert_dates=False)
                for k, v in payload.get("dfs", {}).items()}
+        for k in ("reporte", "comunas"):
+            if k in dfs:
+                dfs[k] = _migrar_comunas(dfs[k])
         out.append((datetime.date.fromisoformat(f), payload.get("meta", {}), dfs))
     return out
 
@@ -990,22 +1006,24 @@ def procesar_comunas(hela, b, fecha):
             "P: No Entregados París BTK": int(len(paris)) - ent_paris,
             "Q: NS Patente (%)": round(pct(ent, tot), 2),
             "R: Puntos BTK": tot,
-            "S: Coincide puntos": s_pts,
-            "T: Compromisos BTK": comp_btk,
-            "U: Coincide compromisos": s_comp,
-            "V: Usuario móvil BTK": usuario_btk,
-            "W: Comuna lejana según Hela": nombre_h if partes_hela else "",
-            "X: Coincide con Hela": coincide_comuna,
-            "Y: Comunas no reconocidas": ", ".join(desconocidas),
-            "Z: Origen": origen,
-            "AA: Dif. puntos (BTK − Hela)": dif_pts,
-            "AB: Dif. compromisos (BTK − Hela)": dif_comp,
-            "AC: Comunas agregadas desde BTK": " - ".join(extras) if partes_hela else "",
-            "AD: Valor según Hela": valor_h if partes_hela else None,
-            "AE: Letra de ruta": letra,
-            "AF: Pedidos de otras rutas en esta patente": otras_rutas,
-            "AG: Pedidos de esta ruta llevados por otra patente": otras_patentes,
-            "AH: Pedidos con la letra de esta ruta (BTK)": n_letra,
+            "S: Pedidos Easy": int(len(easy)),
+            "T: Pedidos París": int(len(paris)),
+            "U: Coincide puntos": s_pts,
+            "V: Compromisos BTK": comp_btk,
+            "W: Coincide compromisos": s_comp,
+            "X: Usuario móvil BTK": usuario_btk,
+            "Y: Comuna lejana según Hela": nombre_h if partes_hela else "",
+            "Z: Coincide con Hela": coincide_comuna,
+            "AA: Comunas no reconocidas": ", ".join(desconocidas),
+            "AB: Origen": origen,
+            "AC: Dif. puntos (BTK − Hela)": dif_pts,
+            "AD: Dif. compromisos (BTK − Hela)": dif_comp,
+            "AE: Comunas agregadas desde BTK": " - ".join(extras) if partes_hela else "",
+            "AF: Valor según Hela": valor_h if partes_hela else None,
+            "AG: Letra de ruta": letra,
+            "AH: Pedidos de otras rutas en esta patente": otras_rutas,
+            "AI: Pedidos de esta ruta llevados por otra patente": otras_patentes,
+            "AJ: Pedidos con la letra de esta ruta (BTK)": n_letra,
         }
 
     def etiqueta_conductor(bp, letra=None):
@@ -1090,7 +1108,7 @@ def procesar_comunas(hela, b, fecha):
     df = pd.DataFrame(filas)
     info = {"modo_union": "patente" if por_patente else "letra",
             "patentes_solo_btk": solo_btk,
-            "patentes_solo_hela": df.loc[df["Z: Origen"] == ORIGEN_SOLO_HELA, "C: Patente"].tolist() if len(df) else [],
+            "patentes_solo_hela": df.loc[df["AB: Origen"] == ORIGEN_SOLO_HELA, "C: Patente"].tolist() if len(df) else [],
             "mapeo_hela": mapa_a_filas(h.attrs["mapeo"]), "avisos_hela": avisos_hela,
             "mapeo_btk": mapa_a_filas(attrs_b.get("mapeo", {})), "avisos_btk": list(attrs_b.get("avisos", []))}
     return df, info
@@ -1322,8 +1340,35 @@ def concat_dfs(datos, nombre, con_fecha=False):
 # =====================================================================
 # EXCEL
 # =====================================================================
+def _es_pct(nombre):
+    t = str(nombre)
+    return "(%)" in t or t.startswith("%")
+
+
+def _con_porcentajes(df):
+    """Excel guarda los porcentajes como fracción (0,9231) con formato de %, para que se puedan formatear y operar.
+    Devuelve (df, columnas_en_porcentaje, posiciones_de_filas_en_porcentaje)."""
+    d = df.copy()
+    cols = [c for c in d.columns if _es_pct(c) and pd.api.types.is_numeric_dtype(d[c])]
+    for c in cols:
+        d[c] = (d[c] / 100).round(6)
+    filas = []
+    if "Indicador" in d.columns:
+        otras = [c for c in d.columns if c != "Indicador"]
+        d[otras] = d[otras].astype(object)
+        for pos, (_, fila) in enumerate(d.iterrows()):
+            if _es_pct(fila["Indicador"]):
+                filas.append(pos)
+                for c in otras:
+                    v = d.iloc[pos][c]
+                    if isinstance(v, (int, float)) and not pd.isna(v):
+                        d.iloc[pos, d.columns.get_loc(c)] = round(v / 100, 6)
+    return d, cols, filas
+
+
 def a_excel(hojas):
-    """hojas = {'Nombre': DataFrame}. Encabezado en negrita, filtros, primera fila fija y ancho automático."""
+    """hojas = {'Nombre': DataFrame}. Encabezado en negrita, filtros, primera fila fija, ancho automático y
+    los porcentajes con formato de % (las columnas con «(%)» o que empiezan con «%»)."""
     from openpyxl.styles import Font, PatternFill
 
     if not hojas:
@@ -1338,7 +1383,8 @@ def a_excel(hojas):
                 n = f"{base[:28]}_{i}"
                 i += 1
             usados.add(n)
-            df.to_excel(writer, sheet_name=n, index=False)
+            d, cols_pct, filas_pct = _con_porcentajes(df)
+            d.to_excel(writer, sheet_name=n, index=False)
             ws = writer.sheets[n]
             ws.freeze_panes = "A2"
             if ws.max_row > 1 and ws.max_column >= 1:
@@ -1346,6 +1392,13 @@ def a_excel(hojas):
             for celda in ws[1]:
                 celda.font = Font(bold=True)
                 celda.fill = PatternFill("solid", fgColor="E9EDF2")
+            for c in cols_pct:
+                col_n = list(d.columns).index(c) + 1
+                for fila in range(2, ws.max_row + 1):
+                    ws.cell(fila, col_n).number_format = "0.00%"
+            for pos in filas_pct:
+                for col_n in range(2, ws.max_column + 1):
+                    ws.cell(pos + 2, col_n).number_format = "0.00%"
             for col in ws.columns:
                 largo = max((len(str(c.value)) for c in col if c.value is not None), default=0)
                 ws.column_dimensions[col[0].column_letter].width = min(largo + 2, 45)
@@ -1442,20 +1495,25 @@ def tablas_ns_acido(b):
 
 
 def tabla_patentes(b):
-    """Por patente en el mes: órdenes totales, de Easy, de París y % de entrega (entregadas o recogidas / totales)."""
+    """Nivel de servicio de cada patente en el mes: órdenes totales, de Easy y de París, entregadas o recogidas,
+    % de entrega del mes (entregadas / totales) y el % de cada cliente."""
     e = b[(b["ES_EASY"] | b["ES_PARIS"]) & b["PAT_KEY"].ne("")]
     cols = ["Patente", "Órdenes totales", "Easy", "París", "Entregadas / recogidas", "No entregadas",
-            "% entrega del mes", "Días en ruta"]
+            "% entrega del mes", "NS Easy (%)", "NS París (%)", "Días en ruta"]
     if e.empty:
         return pd.DataFrame(columns=cols)
+    e = e.assign(EASY_ENT=e["ES_EASY"] & e["ENTREGADO"], PARIS_ENT=e["ES_PARIS"] & e["ENTREGADO"])
     g = e.groupby("PAT_KEY").agg(Patente=("PATENTE", "first"), tot=("ORDEN", "size"), easy=("ES_EASY", "sum"),
-                                 paris=("ES_PARIS", "sum"), ent=("ENTREGADO", "sum"),
-                                 dias=("FECHA", "nunique")).reset_index(drop=True)
+                                 paris=("ES_PARIS", "sum"), ent=("ENTREGADO", "sum"), easy_ent=("EASY_ENT", "sum"),
+                                 paris_ent=("PARIS_ENT", "sum"), dias=("FECHA", "nunique")).reset_index(drop=True)
     out = pd.DataFrame({
         "Patente": g["Patente"], "Órdenes totales": g["tot"].astype(int), "Easy": g["easy"].astype(int),
         "París": g["paris"].astype(int), "Entregadas / recogidas": g["ent"].astype(int),
         "No entregadas": (g["tot"] - g["ent"]).astype(int),
-        "% entrega del mes": (g["ent"] / g["tot"] * 100).round(2), "Días en ruta": g["dias"].astype(int),
+        "% entrega del mes": (g["ent"] / g["tot"] * 100).round(2),
+        "NS Easy (%)": (g["easy_ent"] / g["easy"].where(g["easy"] > 0) * 100).round(2),
+        "NS París (%)": (g["paris_ent"] / g["paris"].where(g["paris"] > 0) * 100).round(2),
+        "Días en ruta": g["dias"].astype(int),
     })
     return out.sort_values("Órdenes totales", ascending=False).reset_index(drop=True)
 
@@ -1716,7 +1774,7 @@ def excel_mensual(dfs, regs, anio, mes):
             filas.append(fila)
         hojas["Datos compromiso ingresados"] = pd.DataFrame(filas)
     for clave, nombre in (("acido_dia", "NS Ácido día"), ("acido_semana", "NS Ácido semana"),
-                          ("acido_mes", "NS Ácido mes"), ("patentes", "Órdenes por patente"),
+                          ("acido_mes", "NS Ácido mes"), ("patentes", "Órdenes y NS por patente"),
                           ("subestados_noent", "Sub-estados no entregados"),
                           ("calce_pendientes", "Calce París pendientes"), ("calce_todas", "Calce París todas"),
                           ("calce_dia", "Calce París por día"), ("calce_diagnostico", "Calce París diagnóstico")):
@@ -2046,17 +2104,17 @@ def aviso_no_entregados(nombre, tot, ent):
 
 def alarma_hela_btk(df):
     """Alarma cuando Hela y BTK no coinciden en puntos o compromisos. El reporte se guía por el BTK."""
-    flag = (df["S: Coincide puntos"].eq("NO") | df["U: Coincide compromisos"].eq("NO")
-            | df["Z: Origen"].ne(ORIGEN_OK))
+    flag = (df["U: Coincide puntos"].eq("NO") | df["W: Coincide compromisos"].eq("NO")
+            | df["AB: Origen"].ne(ORIGEN_OK))
     dif = df[flag]
     if dif.empty:
         st.success("✅ Hela y BTK coinciden en todas las patentes.")
         return
     st.error(f"🚨 {len(dif)} de {len(df)} patentes no coinciden entre Hela y BTK. "
              "Los números del reporte salen del BTK; el Hela solo se usa como referencia.")
-    cols = ["C: Patente", "B: Driver", "Z: Origen", "G: Total puntos HELA", "R: Puntos BTK",
-            "AA: Dif. puntos (BTK − Hela)", "H: Compromisos HELA", "T: Compromisos BTK",
-            "AB: Dif. compromisos (BTK − Hela)"]
+    cols = ["C: Patente", "B: Driver", "AB: Origen", "G: Total puntos HELA", "R: Puntos BTK",
+            "AC: Dif. puntos (BTK − Hela)", "H: Compromisos HELA", "V: Compromisos BTK",
+            "AD: Dif. compromisos (BTK − Hela)"]
     mostrar_df(dif[cols].reset_index(drop=True))
     st.caption("Si el BTK tiene más órdenes que el Hela, lo normal es que se hayan agregado durante el día, "
                "después de subir el Hela la noche anterior.")
@@ -2064,15 +2122,15 @@ def alarma_hela_btk(df):
 
 def aviso_cambios_comuna(df):
     """Muestra las patentes donde la comuna pagada (según BTK) cambió respecto de Hela o se agregaron comunas."""
-    cambio = df[df["X: Coincide con Hela"].eq("NO")]
-    agregadas = df[df["AC: Comunas agregadas desde BTK"].fillna("").ne("")]
+    cambio = df[df["Z: Coincide con Hela"].eq("NO")]
+    agregadas = df[df["AE: Comunas agregadas desde BTK"].fillna("").ne("")]
     if not cambio.empty:
         st.warning(f"🔁 En {len(cambio)} patente(s) la comuna pagada cambió al usar el BTK.")
-        mostrar_df(cambio[["C: Patente", "B: Driver", "W: Comuna lejana según Hela", "AD: Valor según Hela",
+        mostrar_df(cambio[["C: Patente", "B: Driver", "Y: Comuna lejana según Hela", "AF: Valor según Hela",
                            "I: Comuna Lejana", "J: Valor"]].reset_index(drop=True))
     if not agregadas.empty:
         st.info(f"➕ Se agregaron comunas del BTK que no estaban en Hela en {len(agregadas)} patente(s).")
-        mostrar_df(agregadas[["C: Patente", "B: Driver", "AC: Comunas agregadas desde BTK"]].reset_index(drop=True))
+        mostrar_df(agregadas[["C: Patente", "B: Driver", "AE: Comunas agregadas desde BTK"]].reset_index(drop=True))
 
 
 def aviso_rutas_mixtas(df, info):
@@ -2080,14 +2138,14 @@ def aviso_rutas_mixtas(df, info):
         st.info("🔗 El Hela no trae patentes: cada fila se tomó como una ruta (A, B, C… en el orden del archivo) y "
                 "se unió con el BTK por la letra de la columna «conductor». Cada ruta quedó con una sola patente "
                 "(la que llevó más pedidos con su letra) y los números salen de todos los pedidos de esa patente.")
-    cruz = df[df["AF: Pedidos de otras rutas en esta patente"].fillna("").ne("")
-              | df["AG: Pedidos de esta ruta llevados por otra patente"].fillna("").ne("")]
+    cruz = df[df["AH: Pedidos de otras rutas en esta patente"].fillna("").ne("")
+              | df["AI: Pedidos de esta ruta llevados por otra patente"].fillna("").ne("")]
     if not cruz.empty:
         st.warning(f"🔀 {len(cruz)} ruta(s) tienen pedidos cruzados: una patente llevó pedidos con la letra de otra "
                    "ruta. Es lo que hace que los puntos del BTK cambien respecto del Hela.")
-        mostrar_df(cruz[["AE: Letra de ruta", "C: Patente", "AH: Pedidos con la letra de esta ruta (BTK)",
-                         "AF: Pedidos de otras rutas en esta patente",
-                         "AG: Pedidos de esta ruta llevados por otra patente"]].reset_index(drop=True))
+        mostrar_df(cruz[["AG: Letra de ruta", "C: Patente", "AJ: Pedidos con la letra de esta ruta (BTK)",
+                         "AH: Pedidos de otras rutas en esta patente",
+                         "AI: Pedidos de esta ruta llevados por otra patente"]].reset_index(drop=True))
 
 
 @st.cache_data(show_spinner=False, max_entries=3)
@@ -2393,14 +2451,14 @@ with tabs[1]:
         if df_com.empty:
             st.warning("No hay registros de comunas en el rango seleccionado.")
         else:
-            sin_matriz = df_com["Y: Comunas no reconocidas"].fillna("").ne("").sum()
-            malos = (df_com["S: Coincide puntos"].eq("NO") | df_com["U: Coincide compromisos"].eq("NO")
-                     | df_com["Z: Origen"].ne(ORIGEN_OK)).sum()
+            sin_matriz = df_com["AA: Comunas no reconocidas"].fillna("").ne("").sum()
+            malos = (df_com["U: Coincide puntos"].eq("NO") | df_com["W: Coincide compromisos"].eq("NO")
+                     | df_com["AB: Origen"].ne(ORIGEN_OK)).sum()
             k1, k2, k3 = st.columns(3)
             k1.metric("Filas (patente-día)", len(df_com))
             k2.metric("Patentes con diferencias Hela vs BTK", int(malos))
             k3.metric("Con comunas no reconocidas", int(sin_matriz))
-            mostrar_df(estilizar(df_com, ["S: Coincide puntos", "U: Coincide compromisos", "X: Coincide con Hela"],
+            mostrar_df(estilizar(df_com, ["U: Coincide puntos", "W: Coincide compromisos", "Z: Coincide con Hela"],
                                  "NO", "SÍ"))
             st.download_button("📥 Descargar Reporte de Comunas en Excel", a_excel({"Comunas": df_com}),
                                file_name=f"Comunas_{rango_c[0].isoformat()}_a_{rango_c[1].isoformat()}.xlsx",
@@ -2656,7 +2714,7 @@ with tabs[6]:
     regs_m = cargar_fc_mes(primer_m, ultimo_m)
     res_cal = cargar("calce_mensual", primer_m, primer_m)
     meta_cal, dfs_cal = (res_cal[0][1], res_cal[0][2]) if res_cal else ({}, {})
-    sub = st.tabs(["Comunas del mes", "NS Compromiso", "NS Ácido", "Órdenes por patente", "Descargar todo",
+    sub = st.tabs(["Comunas del mes", "NS Compromiso", "NS Ácido", "NS por patente (mes)", "Descargar todo",
                    "Calce París del mes"])
     sin_datos = "Todavía no hay datos de este mes. Sube los archivos y presiona «Procesar mes»."
 
@@ -2674,13 +2732,21 @@ with tabs[6]:
             q2.metric("Rutas-día", len(com_m))
             q3.metric("Rutas con pago", len(bon_m))
             q4.metric("Bonificación del mes", f"$ {int(bon_m['D: Valor'].sum()):,}".replace(",", "."))
-            mostrar_df(estilizar(com_m, ["S: Coincide puntos", "U: Coincide compromisos", "X: Coincide con Hela"],
+            mostrar_df(estilizar(com_m, ["U: Coincide puntos", "W: Coincide compromisos", "Z: Coincide con Hela"],
                                  "NO", "SÍ"))
             st.subheader("Bonificación del mes por patente")
             mostrar_df(bonificacion_por_patente(bon_m))
+            pat_c = dfs_m.get("patentes", pd.DataFrame())
+            if not pat_c.empty:
+                st.subheader("NS de cada patente en el mes")
+                st.caption("Resumen del mes por patente, aparte del detalle de cada día de la tabla de arriba.")
+                mostrar_df(pat_c)
+            hojas_c = {"Comunas del mes": com_m, "Bonificación del mes": bon_m,
+                       "Bonificación por patente": bonificacion_por_patente(bon_m)}
+            if not pat_c.empty:
+                hojas_c["NS por patente del mes"] = pat_c
             st.download_button("📥 Descargar comunas y bonificación del mes (Excel)",
-                               a_excel({"Comunas del mes": com_m, "Bonificación del mes": bon_m,
-                                        "Bonificación por patente": bonificacion_por_patente(bon_m)}),
+                               a_excel(hojas_c),
                                file_name=f"Comunas_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_com_mes")
 
     # ----- NS Compromiso (ingreso manual) -----
@@ -2806,9 +2872,9 @@ with tabs[6]:
             st.info(sin_datos)
         else:
             mostrar_df(pat_m)
-            st.caption("% de entrega = órdenes entregadas o recogidas / órdenes totales de la patente en el mes "
-                       "(solo Easy y París).")
-            st.download_button("📥 Descargar órdenes por patente en Excel", a_excel({"Órdenes por patente": pat_m}),
+            st.caption("% entrega del mes = órdenes entregadas o recogidas / órdenes totales de la patente en el mes "
+                       "(solo Easy y París). NS Easy y NS París usan el mismo cálculo con los pedidos de cada cliente.")
+            st.download_button("📥 Descargar NS por patente en Excel", a_excel({"NS por patente del mes": pat_m}),
                                file_name=f"Ordenes_por_patente_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_pat_mes")
 
     # ----- Descargar todo -----
