@@ -29,7 +29,7 @@ st.set_page_config(
 DB_PATH = os.environ.get("YANEZ_DB", "reportes_yanez.db")
 
 # Se muestra en la barra lateral para saber qué versión del código está corriendo en Streamlit Cloud.
-APP_VERSION = "v4 · Excel y PDF en el reporte mensual, gráfico del NS ácido"
+APP_VERSION = "v6 · gráfico en el NS compromiso (pantalla, PDF y Excel)"
 
 # Cómo se busca cada columna: primero por el nombre del encabezado (exacto), luego por palabras que
 # contenga, y solo como último recurso por su posición (0 = columna A), validando que el contenido tenga sentido.
@@ -1502,6 +1502,9 @@ def _grafico_lineas_excel(ws, d, g):
     ws.add_chart(ch, f"{get_column_letter(ws.max_column + 2)}2")
 
 
+GRAFICO_COMPROMISO_EXCEL = {"NS Compromiso día": {"titulo": "NS Compromiso por día", "x": "Fecha",
+                                                  "series": ["NS Easy (%)", "NS París (%)", "NS Compromiso (%)"],
+                                                  "colores": ["1F5FBF", "7FC4FF", "FF2B2B"]}}
 GRAFICO_ACIDO_EXCEL = {"NS Ácido día": {"titulo": "NS Ácido por día", "x": "Fecha",
                                         "series": ["NS Easy (%)", "NS París (%)", "NS Ácido (%)"],
                                         "colores": ["1F5FBF", "7FC4FF", "FF2B2B"]}}
@@ -1910,7 +1913,7 @@ def excel_mensual(dfs, regs, anio, mes):
         d = dfs.get(clave)
         if d is not None and not d.empty:
             hojas[nombre] = d
-    return a_excel(hojas, GRAFICO_ACIDO_EXCEL) if hojas else None
+    return a_excel(hojas, {**GRAFICO_ACIDO_EXCEL, **GRAFICO_COMPROMISO_EXCEL}) if hojas else None
 
 
 # --- PDF de los reportes mensuales ---
@@ -1962,7 +1965,7 @@ def _grafico_lineas_pdf(g, ancho):
     lc.categoryAxis.labels.dy = -2
     lc.categoryAxis.strokeColor = colors.HexColor("#9AA7BF")
     lc.valueAxis.valueMin, lc.valueAxis.valueMax = ymin, 100
-    lc.valueAxis.valueStep = 10
+    lc.valueAxis.valueStep = 5 if (100 - ymin) <= 30 else 10
     lc.valueAxis.labelTextFormat = "%d%%"
     lc.valueAxis.labels.fontSize = 7
     lc.valueAxis.strokeColor = colors.HexColor("#9AA7BF")
@@ -2077,6 +2080,12 @@ def _nombre_mes(anio, mes):
     return f"{MESES[mes - 1].capitalize()} {anio}"
 
 
+def GRAFICO_COMPROMISO_PDF(dia_c):  # noqa: N802
+    return {"df": dia_c, "x": "Fecha", "series": ["NS Easy (%)", "NS París (%)", "NS Compromiso (%)"],
+            "etiquetas": ["NS Easy (%)", "NS París (%)", "NS Compromiso general (%)"],
+            "colores": ["#1F5FBF", "#7FC4FF", "#FF2B2B"]}
+
+
 def _secciones_compromiso(regs, anio, mes):
     dia_c, sem_c, mes_c = tablas_ns_compromiso(regs)
     if mes_c is None:
@@ -2084,9 +2093,8 @@ def _secciones_compromiso(regs, anio, mes):
     f = lambda x: fmt_pct(x) if x == x else "—"  # noqa: E731
     return [
         {"titulo": "NS Compromiso del mes",
-         "metricas": [("General", f(mes_c["general"])), ("Easy", f(mes_c["easy"])), ("París", f(mes_c["paris"]))],
-         "nota": "NS compromiso = pedidos con fecha de entrega límite ese día que se entregaron / pedidos con fecha "
-                 "de entrega límite ese día. Semana de lunes a domingo, con los días que tienen datos."},
+         "metricas": [("General", f(mes_c["general"])), ("Easy", f(mes_c["easy"])), ("París", f(mes_c["paris"]))]},
+        {"titulo": "Evolución diaria", "grafico": GRAFICO_COMPROMISO_PDF(dia_c)},
         {"titulo": "Por semana", "df": sem_c},
         {"titulo": "Por día", "df": dia_c},
     ]
@@ -3242,11 +3250,17 @@ with tabs[6]:
             mostrar_df(sem_c)
             st.markdown("**Por día**")
             mostrar_df(dia_c)
+            st.markdown("**Evolución diaria**")
+            graf_c = dia_c.set_index("Fecha")[["NS Easy (%)", "NS París (%)", "NS Compromiso (%)"]]
+            try:
+                st.line_chart(graf_c, color=["#0068c9", "#83c9ff", "#ff2b2b"])
+            except TypeError:  # versiones antiguas de Streamlit sin el parámetro de color
+                st.line_chart(graf_c)
             st.caption("Para descargar usa los botones de abajo (Excel o PDF). El ícono pequeño de la tabla baja un "
                        "CSV que Excel en español abre todo en una columna.")
             dc1, dc2 = st.columns(2)
             dc1.download_button("📥 Descargar NS Compromiso en Excel",
-                                a_excel(hojas_compromiso(regs_m, anio_m, mes_m)),
+                                a_excel(hojas_compromiso(regs_m, anio_m, mes_m), GRAFICO_COMPROMISO_EXCEL),
                                 file_name=f"NS_Compromiso_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_comp_xlsx")
             dc2.download_button("📄 Descargar NS Compromiso en PDF", pdf_ns_compromiso(regs_m, anio_m, mes_m),
                                 file_name=f"NS_Compromiso_{anio_m}-{mes_m:02d}.pdf", mime="application/pdf",
