@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Gestión de Naves espaciales",
+    page_title="Gestión de Naves Espaciales",
     page_icon="🛸",
     layout="wide",
 )
@@ -27,6 +27,9 @@ st.set_page_config(
 # Si en Secrets existen SUPABASE_URL y SUPABASE_KEY, todo se guarda en Supabase (recomendado en Streamlit Cloud).
 # Si no, se usa este archivo local, que en Streamlit Cloud se borra al reiniciar la app.
 DB_PATH = os.environ.get("YANEZ_DB", "reportes_yanez.db")
+
+# Se muestra en la barra lateral para saber qué versión del código está corriendo en Streamlit Cloud.
+APP_VERSION = "v4 · Excel y PDF en el reporte mensual, gráfico del NS ácido"
 
 # Cómo se busca cada columna: primero por el nombre del encabezado (exacto), luego por palabras que
 # contenga, y solo como último recurso por su posición (0 = columna A), validando que el contenido tenga sentido.
@@ -2751,6 +2754,7 @@ else:
     st.sidebar.warning("Guardando en un archivo local: se pierde si la app se reinicia. "
                        "Configura SUPABASE_URL y SUPABASE_KEY en Secrets.")
 st.sidebar.caption("Cada archivo que subes queda registrado con la fecha que elegiste.")
+st.sidebar.caption(f"Versión de la app: {APP_VERSION}")
 
 tabs = st.tabs([
     "1. NS Diario (Easy & París)",
