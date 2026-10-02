@@ -29,7 +29,7 @@ st.set_page_config(
 DB_PATH = os.environ.get("YANEZ_DB", "reportes_yanez.db")
 
 # Se muestra en la barra lateral para saber qué versión del código está corriendo en Streamlit Cloud.
-APP_VERSION = "v8 · carga del día (bultos por centro de distribución)"
+APP_VERSION = "v11 · comuna lejana de $0 se muestra como SIN COMUNA"
 
 # Cómo se busca cada columna: primero por el nombre del encabezado (exacto), luego por palabras que
 # contenga, y solo como último recurso por su posición (0 = columna A), validando que el contenido tenga sentido.
@@ -88,6 +88,8 @@ TARIFAS_BASE = {
     "COLLIGUAY": 17070, "QUINTERO": 13500, "VALPARAISO": 12180,
     "CONCON": 0, "CON CON": 0, "QUILPUE": 0, "VILLA ALEMANA": 0,
     "OLMUE": 0, "LIMACHE": 0, "VIÑA DEL MAR": 0,
+    "CABILDO SECTOR LA PETACA + PETORCA": 81560,
+    "PETORCA + LOS MOLLES (SECTOR DE LA LIGUA)": 84720,
 }
 COMBO = "LOS ANDES + PUTAENDO"
 
@@ -175,7 +177,23 @@ def hoy_chile():
 # TARIFAS DE COMUNAS
 # =====================================================================
 TARIFAS = {limpiar_texto(k): v for k, v in TARIFAS_BASE.items()}
-NOMBRES_PARCIAL = sorted([n for n in TARIFAS if n != COMBO], key=len, reverse=True)
+NOMBRES_PARCIAL = sorted([n for n in TARIFAS if "+" not in n], key=len, reverse=True)
+
+# Orden de tu lista de tarifas, de menos a más lejana. Si dos comunas valen lo mismo, es «más lejana» la que va
+# después en la lista (p. ej. Calle Larga después de Los Andes; Limache después de Concón).
+ORDEN_TARIFAS = ["VIÑA DEL MAR", "CONCON", "QUILPUE", "VILLA ALEMANA", "OLMUE", "LIMACHE", "VALPARAISO", "QUINTERO",
+                 "COLLIGUAY", "QUILLOTA", "PUCHUNCAVI", "LA CRUZ", "LA CALERA", "HIJUELAS", "CASABLANCA", "NOGALES",
+                 "ZAPALLAR", "PAPUDO", "LLAY LLAY", "CATEMU", "ALGARROBO", "PANQUEHUE", "LA LIGUA", "EL QUISCO",
+                 "EL TABO", "CARTAGENA", "SAN ANTONIO", "SAN FELIPE", "SANTA MARIA", "RINCONADA", "CABILDO",
+                 "SANTO DOMINGO", "LOS ANDES", "CALLE LARGA", "SAN ESTEBAN", "PUTAENDO", "PETORCA",
+                 "LOS ANDES + PUTAENDO", "CABILDO SECTOR LA PETACA + PETORCA",
+                 "PETORCA + LOS MOLLES (SECTOR DE LA LIGUA)"]
+RANGO_TARIFAS = {limpiar_texto(n): i for i, n in enumerate(ORDEN_TARIFAS)}
+RANGO_TARIFAS.update({"CON CON": RANGO_TARIFAS["CONCON"], "LLAYLLAY": RANGO_TARIFAS["LLAY LLAY"],
+                      "LLAY-LLAY": RANGO_TARIFAS["LLAY LLAY"]})
+# Combinaciones por sector: (nombre en la matriz, palabra que identifica el sector, comuna base que debe estar)
+COMBOS_SECTOR = [("CABILDO SECTOR LA PETACA + PETORCA", "PETACA", "PETORCA"),
+                 ("PETORCA + LOS MOLLES (SECTOR DE LA LIGUA)", "MOLLES", "PETORCA")]
 
 
 def obtener_tarifa_comuna(comuna_str):
@@ -191,8 +209,10 @@ def obtener_tarifa_comuna(comuna_str):
     return None
 
 
-def comuna_mas_lejana(comunas_texto):
-    """De una lista separada por comas devuelve (comuna, valor, lista_no_reconocidas)."""
+def comuna_mas_lejana(comunas_texto, contexto=""):
+    """De una lista separada por comas devuelve (comuna, valor, lista_no_reconocidas).
+    Si dos comunas valen lo mismo gana la que va después en la lista de tarifas (ORDEN_TARIFAS).
+    `contexto` es texto extra (p. ej. las comunas del Hela) donde se buscan los sectores «La Petaca» y «Los Molles»."""
     texto = "" if comunas_texto is None or pd.isna(comunas_texto) else str(comunas_texto)
     encontrados, desconocidas = [], []
     for item in re.split(r"\s+-\s+|[,;/]", texto):
@@ -206,9 +226,14 @@ def comuna_mas_lejana(comunas_texto):
     nombres = {n for n, _ in encontrados}
     if "LOS ANDES" in nombres and "PUTAENDO" in nombres:
         encontrados.append((COMBO, TARIFAS[COMBO]))
+    ctx = limpiar_texto(f"{texto} {'' if contexto is None or (not isinstance(contexto, str) and pd.isna(contexto)) else contexto}")
+    for nombre_combo, sector, base in COMBOS_SECTOR:
+        clave = limpiar_texto(nombre_combo)
+        if base in nombres and sector in ctx:
+            encontrados.append((clave, TARIFAS[clave]))
     if not encontrados:
         return "SIN COMUNA RECONOCIDA", 0, desconocidas
-    nombre, valor = max(encontrados, key=lambda x: x[1])
+    nombre, valor = max(encontrados, key=lambda x: (x[1], RANGO_TARIFAS.get(x[0], -1)))
     return nombre, valor, desconocidas
 
 
@@ -1003,13 +1028,19 @@ def procesar_comunas(hela, b, fecha, nombres_pat=None):
         nombre_h, valor_h, desc_h = comuna_mas_lejana(" - ".join(partes_hela))
         nombre_b, valor_b, desc_b = ("SIN COMUNA RECONOCIDA", 0, [])
         if comunas_btk:
-            nombre_b, valor_b, desc_b = comuna_mas_lejana(",".join(comunas_btk))
+            nombre_b, valor_b, desc_b = comuna_mas_lejana(",".join(comunas_btk), " - ".join(partes_hela))
         if comunas_btk and nombre_b != "SIN COMUNA RECONOCIDA":
             pagada, valor = nombre_b, valor_b
         else:
             pagada, valor = nombre_h, valor_h
         desconocidas = list(dict.fromkeys(desc_h + desc_b))
-        coincide_comuna = ("SÍ" if pagada == nombre_h else "NO") if (tot and partes_hela) else ""
+        # Una comuna lejana de $0 no genera pago: se muestra «SIN COMUNA» (las no reconocidas se siguen avisando)
+        if valor == 0 and pagada != "SIN COMUNA RECONOCIDA":
+            pagada = "SIN COMUNA"
+        if valor_h == 0 and nombre_h != "SIN COMUNA RECONOCIDA":
+            nombre_h = "SIN COMUNA"
+        # «Coincide con Hela» compara lo que se paga: dos comunas con el mismo valor no son un cambio de pago
+        coincide_comuna = ("SÍ" if (pagada == nombre_h or valor == valor_h) else "NO") if (tot and partes_hela) else ""
 
         if origen == ORIGEN_SOLO_BTK:
             s_pts = s_comp = "SIN HELA"
