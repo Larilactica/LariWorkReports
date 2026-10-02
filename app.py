@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Gestión de Naves Espaciales",
+    page_title="Gestión de Naves",
     page_icon="🛸",
     layout="wide",
 )
@@ -29,7 +29,7 @@ st.set_page_config(
 DB_PATH = os.environ.get("YANEZ_DB", "reportes_yanez.db")
 
 # Se muestra en la barra lateral para saber qué versión del código está corriendo en Streamlit Cloud.
-APP_VERSION = "v11 · comuna lejana de $0 se muestra como SIN COMUNA"
+APP_VERSION = "v12 · patente que retiró la carga (Easy y París)"
 
 # Cómo se busca cada columna: primero por el nombre del encabezado (exacto), luego por palabras que
 # contenga, y solo como último recurso por su posición (0 = columna A), validando que el contenido tenga sentido.
@@ -2070,7 +2070,7 @@ def pdf_reporte(titulo, secciones):
                             bottomMargin=1.6 * cm, title=titulo, author="Transportes Yáñez")
     est = getSampleStyleSheet()
     s_tit = ParagraphStyle("t", parent=est["Title"], alignment=0, fontSize=16, spaceAfter=2)
-    s_sec = ParagraphStyle("s", parent=est["Heading2"], fontSize=12, spaceBefore=10, spaceAfter=4)
+    s_sec = ParagraphStyle("s", parent=est["Heading2"], fontSize=12, spaceBefore=10, spaceAfter=4, keepWithNext=1)
     s_nota = ParagraphStyle("n", parent=est["Normal"], fontSize=8, textColor=colors.HexColor("#6B7A99"))
     historia = [Paragraph(escape(titulo), s_tit)]
 
@@ -2116,7 +2116,9 @@ def pdf_reporte(titulo, secciones):
                       ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4)]
             estilo += [("ALIGN", (i, 1), (i, -1), "RIGHT") for i in num]
             t.setStyle(TableStyle(estilo))
-            bloque += [Spacer(1, 4), t]
+            espacio = Spacer(1, 4)
+            espacio.keepWithNext = 1
+            bloque += [espacio, t]
         if sec.get("nota"):
             bloque += [Spacer(1, 3), Paragraph(escape(sec["nota"]), s_nota)]
         historia.append(KeepTogether(bloque) if (df is None or len(df) < 14) else bloque[0])
@@ -2257,11 +2259,19 @@ def hojas_compromiso(regs, anio, mes):
 # 8. CARGA DEL DÍA (bultos retirados en cada centro de distribución, ingreso manual)
 # =====================================================================
 CENTROS_CARGA = [("easy", "Easy"), ("paris_juncal", "París Juncal"), ("paris_renca", "París Renca")]
+PATRON_PATENTE = re.compile(r"^([A-Z]{4}\d{2}|[A-Z]{2}\d{4})$")  # BBBB12 (formato nuevo) o BB1234 (antiguo)
+
+
+def normalizar_patente(texto):
+    """«lj-dh 73» -> «LJDH73»."""
+    return "" if texto is None else re.sub(r"[\s\-\.]", "", str(texto).upper())
 
 
 def guardar_carga(fecha, valores):
-    """valores = {clave del centro: bultos}."""
-    guardar_resultado("carga", fecha, {k: int(valores.get(k, 0)) for k, _ in CENTROS_CARGA}, {})
+    """valores = {clave del centro: bultos, clave + "_patente": patente que los retiró}."""
+    meta = {k: int(valores.get(k, 0)) for k, _ in CENTROS_CARGA}
+    meta.update({f"{k}_patente": normalizar_patente(valores.get(f"{k}_patente", "")) for k, _ in CENTROS_CARGA})
+    guardar_resultado("carga", fecha, meta, {})
 
 
 def borrar_carga(fecha):
@@ -2270,14 +2280,45 @@ def borrar_carga(fecha):
 
 
 def cargar_carga(f_ini, f_fin):
-    """[(fecha, {clave del centro: bultos})] de los días ingresados en el rango."""
-    return [(f, {k: int(m.get(k, 0) or 0) for k, _ in CENTROS_CARGA}) for f, m, _ in cargar("carga", f_ini, f_fin)]
+    """[(fecha, {centro: bultos, centro_patente: patente})] de los días ingresados en el rango."""
+    out = []
+    for f, m, _ in cargar("carga", f_ini, f_fin):
+        v = {k: int(m.get(k, 0) or 0) for k, _ in CENTROS_CARGA}
+        v.update({f"{k}_patente": str(m.get(f"{k}_patente", "") or "") for k, _ in CENTROS_CARGA})
+        out.append((f, v))
+    return out
 
 
 def _agregar_total(df, texto):
     fila = {c: (int(df[c].sum()) if pd.api.types.is_numeric_dtype(df[c]) else "") for c in df.columns}
     fila[df.columns[0]] = texto
     return pd.concat([df, pd.DataFrame([fila])], ignore_index=True)
+
+
+def _total_dia(v):
+    return sum(v[k] for k, _ in CENTROS_CARGA)
+
+
+def tabla_carga_patentes(regs):
+    """Bultos retirados por cada patente en el período (cada centro-día suma a la patente que lo retiró)."""
+    filas = {}
+    for f, v in regs:
+        for k, nombre in CENTROS_CARGA:
+            if v[k] <= 0:
+                continue
+            pat = v.get(f"{k}_patente", "") or "(sin patente)"
+            fila = filas.setdefault(pat, {"Patente": pat, **{n: 0 for _, n in CENTROS_CARGA}, "Días": set()})
+            fila[nombre] += v[k]
+            fila["Días"].add(f)
+    out = []
+    for fila in filas.values():
+        fila["Total bultos"] = sum(fila[n] for _, n in CENTROS_CARGA)
+        fila["Días"] = len(fila["Días"])
+        out.append(fila)
+    cols = ["Patente"] + [n for _, n in CENTROS_CARGA] + ["Total bultos", "Días"]
+    if not out:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(out)[cols].sort_values("Total bultos", ascending=False).reset_index(drop=True)
 
 
 def tablas_carga(regs):
@@ -2295,13 +2336,14 @@ def tablas_carga(regs):
     for f, v in regs:
         fila = {"Fecha": f.strftime("%d/%m/%Y"), "Semana": etiquetas[inicio_semana(f)]}
         fila.update({n: v[k] for k, n in CENTROS_CARGA})
-        fila["Total"] = sum(v.values())
+        fila["Total"] = _total_dia(v)
+        fila.update({f"Patente {n}": v.get(f"{k}_patente", "") for k, n in CENTROS_CARGA})
         dias.append(fila)
     semanas = []
     for k, g_ in sorted(sems.items()):
         fila = {"Semana": etiquetas[k], "Días con datos": len(g_)}
         fila.update({n: sum(v[c] for _, v in g_) for c, n in CENTROS_CARGA})
-        fila["Total"] = sum(sum(v.values()) for _, v in g_)
+        fila["Total"] = sum(_total_dia(v) for _, v in g_)
         semanas.append(fila)
     por_dia, por_semana = pd.DataFrame(dias), pd.DataFrame(semanas)
     total = int(por_dia["Total"].sum())
@@ -2317,8 +2359,12 @@ def hojas_carga(regs):
     por_dia, por_semana, resumen = tablas_carga(regs)
     if por_dia is None:
         return {}
-    return {"Carga por día": _agregar_total(por_dia, "TOTAL"), "Carga por semana": _agregar_total(por_semana, "TOTAL"),
-            "Resumen": resumen}
+    hojas = {"Carga por día": _agregar_total(por_dia, "TOTAL"), "Carga por semana": _agregar_total(por_semana, "TOTAL")}
+    por_pat = tabla_carga_patentes(regs)
+    if not por_pat.empty:
+        hojas["Carga por patente"] = _agregar_total(por_pat, "TOTAL")
+    hojas["Resumen"] = resumen
+    return hojas
 
 
 def pdf_carga(regs, f_ini, f_fin):
@@ -2326,11 +2372,13 @@ def pdf_carga(regs, f_ini, f_fin):
     nombres = [n for _, n in CENTROS_CARGA]
     tot = {r["Centro"]: r["Total bultos"] for _, r in resumen.iterrows()}
     metricas = [("Total bultos", _celda_pdf("x", tot["Total"]))] + [(n, _celda_pdf("x", tot[n])) for n in nombres]
-    return pdf_reporte(f"Carga diaria | {f_ini:%d/%m/%Y} al {f_fin:%d/%m/%Y}", [
-        {"titulo": "Bultos retirados en el período", "metricas": metricas},
-        {"titulo": "Por semana", "df": _agregar_total(por_semana, "TOTAL")},
-        {"titulo": "Por día", "df": _agregar_total(por_dia, "TOTAL")},
-    ])
+    secs = [{"titulo": "Bultos retirados en el período", "metricas": metricas},
+            {"titulo": "Por semana", "df": _agregar_total(por_semana, "TOTAL")}]
+    por_pat = tabla_carga_patentes(regs)
+    if not por_pat.empty:
+        secs.append({"titulo": "Por patente", "df": _agregar_total(por_pat, "TOTAL")})
+    secs.append({"titulo": "Por día", "df": _agregar_total(por_dia, "TOTAL")})
+    return pdf_reporte(f"Carga diaria | {f_ini:%d/%m/%Y} al {f_fin:%d/%m/%Y}", secs)
 
 
 # ===================== INTERFAZ =====================
@@ -3572,7 +3620,16 @@ with tabs[7]:
         vals_cg[clave_] = col_.number_input(f"{nombre_} (bultos)", min_value=0, step=1,
                                             value=int(previo_cg.get(clave_, 0)),
                                             key=f"carga_{clave_}_{dia_cg.isoformat()}")
-    st.metric("Total del día", f"{sum(vals_cg.values()):,}".replace(",", "."))
+        pat_ = col_.text_input(f"Patente que retiró ({nombre_})", value=previo_cg.get(f"{clave_}_patente", ""),
+                               key=f"carga_pat_{clave_}_{dia_cg.isoformat()}", max_chars=12,
+                               placeholder="ej. RWSF12")
+        vals_cg[f"{clave_}_patente"] = pat_
+        pat_n = normalizar_patente(pat_)
+        if pat_n and not PATRON_PATENTE.match(pat_n):
+            col_.warning(f"«{pat_}» no parece una patente (ej. RWSF12 o AB1234).")
+        elif vals_cg[clave_] > 0 and not pat_n:
+            col_.caption("Sin patente")
+    st.metric("Total del día", f"{sum(vals_cg[k_] for k_, _ in CENTROS_CARGA):,}".replace(",", "."))
     cg1, cg2 = st.columns(2)
     if cg1.button("💾 Guardar este día", key="b_carga_g"):
         guardar_carga(dia_cg, vals_cg)
@@ -3602,6 +3659,10 @@ with tabs[7]:
                 mc.metric(nombre_, f"{tot_cg[nombre_]:,}".replace(",", "."))
             st.markdown("**Por semana**")
             mostrar_df(por_sem_cg)
+            por_pat_cg = tabla_carga_patentes(regs_cg)
+            if not por_pat_cg.empty:
+                st.markdown("**Por patente**")
+                mostrar_df(por_pat_cg)
             st.markdown("**Por día**")
             mostrar_df(por_dia_cg)
             with st.expander("Resumen del período"):
