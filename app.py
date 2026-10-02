@@ -29,7 +29,7 @@ st.set_page_config(
 DB_PATH = os.environ.get("YANEZ_DB", "reportes_yanez.db")
 
 # Se muestra en la barra lateral para saber qué versión del código está corriendo en Streamlit Cloud.
-APP_VERSION = "v6 · gráfico en el NS compromiso (pantalla, PDF y Excel)"
+APP_VERSION = "v8 · carga del día (bultos por centro de distribución)"
 
 # Cómo se busca cada columna: primero por el nombre del encabezado (exacto), luego por palabras que
 # contenga, y solo como último recurso por su posición (0 = columna A), validando que el contenido tenga sentido.
@@ -139,6 +139,28 @@ def pct(a, b):
 
 def fmt_pct(x):
     return f"{x:.2f}".replace(".", ",") + " %"
+
+
+def parsear_fechas_dt(serie):
+    """Convierte una columna a fechas (datetime64). Los textos que empiezan con el año («2026-09-05») se leen como
+    año-mes-día; el resto («05/09/2026», «5-9-26») como día/mes/año. Así un día 5 de septiembre nunca se lee como
+    9 de mayo."""
+    if pd.api.types.is_datetime64_any_dtype(serie):
+        return pd.to_datetime(serie, errors="coerce")
+    t = serie.astype(str).str.strip()
+    iso = t.str.match(r"^\d{4}-\d{1,2}-\d{1,2}")
+    out = pd.Series(pd.NaT, index=serie.index, dtype="datetime64[ns]")
+    if iso.any():
+        out[iso] = pd.to_datetime(t[iso].str.extract(r"^(\d{4}-\d{1,2}-\d{1,2})")[0], format="%Y-%m-%d",
+                                  errors="coerce")
+    if (~iso).any():
+        resto = t[~iso].replace({"": None, "nan": None, "NaT": None, "None": None, "<NA>": None})
+        out[~iso] = pd.to_datetime(resto, errors="coerce", dayfirst=True, format="mixed")
+    return out
+
+
+def parsear_fechas(serie):
+    return parsear_fechas_dt(serie).dt.date
 
 
 def hoy_chile():
@@ -647,11 +669,11 @@ def _valida(campo, serie):
     if campo == "ESTADO":
         return bool(v.map(limpiar_texto).isin(ESTADOS_CONOCIDOS).any())
     if campo == "F_COMP":
-        return pd.to_datetime(v, errors="coerce", format="mixed", dayfirst=True).notna().mean() >= 0.3
+        return parsear_fechas_dt(v).notna().mean() >= 0.3
     if campo == "FECHA":
         if pd.api.types.is_numeric_dtype(serie):
             return False
-        f = pd.to_datetime(v, errors="coerce", format="mixed", dayfirst=True)
+        f = parsear_fechas_dt(v)
         return bool(((f.dt.year >= 2000) & (f.dt.year <= 2100)).mean() >= 0.5)
     if campo == "CONDUCTOR":
         return v.str.contains(r"(?i)\bruta\s+[A-Z]{1,2}\b").mean() >= 0.3
@@ -740,9 +762,9 @@ def preparar_btk(df):
     b["SUBESTADO"] = txt(col("SUBESTADO"))
     b["SUB_CLEAN"] = b["SUBESTADO"].map(limpiar_texto)
     b["USUARIO"] = txt(col("USUARIO"))
-    b["F_COMP"] = pd.to_datetime(col("F_COMP"), errors="coerce", dayfirst=True, format="mixed").dt.date
+    b["F_COMP"] = parsear_fechas(col("F_COMP"))
     b["COMUNA"] = txt(col("COMUNA"))
-    b["FECHA"] = pd.to_datetime(col("FECHA"), errors="coerce", dayfirst=True, format="mixed").dt.date
+    b["FECHA"] = parsear_fechas(col("FECHA"))
     b["CONDUCTOR"] = txt(col("CONDUCTOR"))
     b["LETRA"] = b["CONDUCTOR"].str.extract(r"(?i)\bruta\s+([A-Z]{1,2})\b")[0].str.upper().fillna("")
     b["ES_EASY"] = b["CLIENTE"].str.contains("EASY", na=False)
@@ -1203,8 +1225,7 @@ def fecha_detectada(tipo, df, nombre=None, hoy=None):
         if tipo == "btk_yanez":
             cols = {limpiar_texto(c): c for c in df.columns}
             if "FECHA RUTA" in cols:
-                f = pd.to_datetime(df[cols["FECHA RUTA"]], errors="coerce", format="mixed",
-                                   dayfirst=True).dt.date.dropna()
+                f = parsear_fechas(df[cols["FECHA RUTA"]]).dropna()
                 if len(f):
                     return f.mode().iloc[0]
     except Exception:  # noqa: BLE001
@@ -1559,8 +1580,7 @@ def mes_detectado(df):
         mapa, _ = mapear_columnas(df, {"FECHA": BTK_CAMPOS["FECHA"]})
         if "FECHA" not in mapa:
             return None
-        f = pd.to_datetime(df.iloc[:, mapa["FECHA"]["indice"]], errors="coerce", dayfirst=True,
-                           format="mixed").dropna()
+        f = parsear_fechas_dt(df.iloc[:, mapa["FECHA"]["indice"]]).dropna()
         if f.empty:
             return None
         m = f.dt.to_period("M").mode().iloc[0]
@@ -1654,8 +1674,7 @@ def procesar_calce_mensual(y, p_raw, anio, mes):
     p = pd.DataFrame({
         "ORDEN": txt(_col(p_raw, mapa_p, "ORDEN")), "EST_P": txt(_col(p_raw, mapa_p, "ESTADO")),
         "SUB_P": txt(_col(p_raw, mapa_p, "SUBESTADO")),
-        "FECHA_P": pd.to_datetime(_col(p_raw, mapa_p, "FECHA"), errors="coerce", dayfirst=True,
-                                  format="mixed").dt.date,
+        "FECHA_P": parsear_fechas(_col(p_raw, mapa_p, "FECHA")),
     })
     p = p[en_mes(p["FECHA_P"])]
     yp = y[y["ES_PARIS"] & en_mes(y["FECHA"])]
@@ -1766,7 +1785,7 @@ def comunas_mensual(hela, b, anio, mes):
     h = preparar_hela(hela)
     if "FECHA" not in h.attrs["mapeo"]:
         raise ValueError("No se encontró la columna de fecha en el Hela mensual (se espera «Fecha» en la columna A).")
-    f_hela = pd.to_datetime(h["FECHA"], errors="coerce", dayfirst=True, format="mixed").ffill().dt.date
+    f_hela = parsear_fechas_dt(h["FECHA"]).ffill().dt.date
     dias_hela = {d for d in f_hela.dropna().unique() if d.year == anio and d.month == mes}
     dias_btk = {d for d in b["FECHA"].dropna().unique() if d.year == anio and d.month == mes}
     avisos, piezas = [], []
@@ -2201,6 +2220,86 @@ def hojas_compromiso(regs, anio, mes):
         filas.append(fila)
     hojas["Datos compromiso ingresados"] = pd.DataFrame(filas)
     return hojas
+
+
+# =====================================================================
+# 8. CARGA DEL DÍA (bultos retirados en cada centro de distribución, ingreso manual)
+# =====================================================================
+CENTROS_CARGA = [("easy", "Easy"), ("paris_juncal", "París Juncal"), ("paris_renca", "París Renca")]
+
+
+def guardar_carga(fecha, valores):
+    """valores = {clave del centro: bultos}."""
+    guardar_resultado("carga", fecha, {k: int(valores.get(k, 0)) for k, _ in CENTROS_CARGA}, {})
+
+
+def borrar_carga(fecha):
+    STORE.borrar_resultado("carga", fecha.isoformat())
+    _invalidar()
+
+
+def cargar_carga(f_ini, f_fin):
+    """[(fecha, {clave del centro: bultos})] de los días ingresados en el rango."""
+    return [(f, {k: int(m.get(k, 0) or 0) for k, _ in CENTROS_CARGA}) for f, m, _ in cargar("carga", f_ini, f_fin)]
+
+
+def _agregar_total(df, texto):
+    fila = {c: (int(df[c].sum()) if pd.api.types.is_numeric_dtype(df[c]) else "") for c in df.columns}
+    fila[df.columns[0]] = texto
+    return pd.concat([df, pd.DataFrame([fila])], ignore_index=True)
+
+
+def tablas_carga(regs):
+    """Bultos por día, por semana (lunes a domingo) y resumen del período.
+    Devuelve (por_dia, por_semana, resumen) o (None, None, None) si no hay datos."""
+    nombres = [n for _, n in CENTROS_CARGA]
+    if not regs:
+        return None, None, None
+    regs = sorted(regs, key=lambda r: r[0])
+    sems = {}
+    for f, v in regs:
+        sems.setdefault(inicio_semana(f), []).append((f, v))
+    etiquetas = {k: etiqueta_semana([f for f, _ in g_]) for k, g_ in sems.items()}
+    dias = []
+    for f, v in regs:
+        fila = {"Fecha": f.strftime("%d/%m/%Y"), "Semana": etiquetas[inicio_semana(f)]}
+        fila.update({n: v[k] for k, n in CENTROS_CARGA})
+        fila["Total"] = sum(v.values())
+        dias.append(fila)
+    semanas = []
+    for k, g_ in sorted(sems.items()):
+        fila = {"Semana": etiquetas[k], "Días con datos": len(g_)}
+        fila.update({n: sum(v[c] for _, v in g_) for c, n in CENTROS_CARGA})
+        fila["Total"] = sum(sum(v.values()) for _, v in g_)
+        semanas.append(fila)
+    por_dia, por_semana = pd.DataFrame(dias), pd.DataFrame(semanas)
+    total = int(por_dia["Total"].sum())
+    resumen = pd.DataFrame([{"Centro": n, "Total bultos": int(por_dia[n].sum()),
+                             "Promedio por día": round(por_dia[n].sum() / len(por_dia), 1),
+                             "% del total": round(pct(por_dia[n].sum(), total), 2)} for n in nombres]
+                           + [{"Centro": "Total", "Total bultos": total,
+                               "Promedio por día": round(total / len(por_dia), 1), "% del total": 100.0}])
+    return por_dia, por_semana, resumen
+
+
+def hojas_carga(regs):
+    por_dia, por_semana, resumen = tablas_carga(regs)
+    if por_dia is None:
+        return {}
+    return {"Carga por día": _agregar_total(por_dia, "TOTAL"), "Carga por semana": _agregar_total(por_semana, "TOTAL"),
+            "Resumen": resumen}
+
+
+def pdf_carga(regs, f_ini, f_fin):
+    por_dia, por_semana, resumen = tablas_carga(regs)
+    nombres = [n for _, n in CENTROS_CARGA]
+    tot = {r["Centro"]: r["Total bultos"] for _, r in resumen.iterrows()}
+    metricas = [("Total bultos", _celda_pdf("x", tot["Total"]))] + [(n, _celda_pdf("x", tot[n])) for n in nombres]
+    return pdf_reporte(f"Carga diaria | {f_ini:%d/%m/%Y} al {f_fin:%d/%m/%Y}", [
+        {"titulo": "Bultos retirados en el período", "metricas": metricas},
+        {"titulo": "Por semana", "df": _agregar_total(por_semana, "TOTAL")},
+        {"titulo": "Por día", "df": _agregar_total(por_dia, "TOTAL")},
+    ])
 
 
 # ===================== INTERFAZ =====================
@@ -2772,6 +2871,7 @@ tabs = st.tabs([
     "5. Consolidado Semanal/Rango",
     "6. Descargas y Respaldo",
     "7. Reporte Mensual",
+    "8. Carga del día",
 ])
 
 # ---------------------------------------------------------------------
@@ -3424,3 +3524,61 @@ with tabs[6]:
                                a_excel({"Pendientes": pend, "Todas las órdenes": dfs_cal["calce_todas"],
                                         "Por día": dfs_cal["calce_dia"], "Diagnóstico": dfs_cal["calce_diagnostico"]}),
                                file_name=f"Calce_Paris_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_calce_mes")
+
+
+# ---------------------------------------------------------------------
+# TAB 8: CARGA DEL DÍA (bultos retirados por centro de distribución)
+# ---------------------------------------------------------------------
+with tabs[7]:
+    st.header("8. Carga del día")
+    st.markdown("Cantidad de **bultos retirados** en cada centro de distribución. Se ingresa a mano, un día a la vez.")
+    dia_cg = st.date_input("Día", HOY, key="carga_dia")
+    guardado_cg = cargar("carga", dia_cg, dia_cg)
+    previo_cg = guardado_cg[0][1] if guardado_cg else {}
+    cols_cg = st.columns(len(CENTROS_CARGA))
+    vals_cg = {}
+    for col_, (clave_, nombre_) in zip(cols_cg, CENTROS_CARGA):
+        vals_cg[clave_] = col_.number_input(f"{nombre_} (bultos)", min_value=0, step=1,
+                                            value=int(previo_cg.get(clave_, 0)),
+                                            key=f"carga_{clave_}_{dia_cg.isoformat()}")
+    st.metric("Total del día", f"{sum(vals_cg.values()):,}".replace(",", "."))
+    cg1, cg2 = st.columns(2)
+    if cg1.button("💾 Guardar este día", key="b_carga_g"):
+        guardar_carga(dia_cg, vals_cg)
+        st.success(f"Guardado el {dia_cg:%d/%m/%Y}.")
+        st.rerun()
+    if guardado_cg and cg2.button("🗑️ Eliminar este día", key="b_carga_d"):
+        borrar_carga(dia_cg)
+        st.rerun()
+
+    st.markdown("---")
+    st.subheader("📅 Reporte por período")
+    rc1, rc2 = st.columns(2)
+    f_ini_cg = rc1.date_input("Desde fecha", datetime.date(HOY.year, HOY.month, 1), key="carga_ini")
+    f_fin_cg = rc2.date_input("Hasta fecha", HOY, key="carga_fin")
+    if f_ini_cg > f_fin_cg:
+        st.warning("La fecha 'Desde' es posterior a 'Hasta'.")
+    else:
+        regs_cg = cargar_carga(f_ini_cg, f_fin_cg)
+        por_dia_cg, por_sem_cg, resumen_cg = tablas_carga(regs_cg)
+        if por_dia_cg is None:
+            st.info("No hay días ingresados en ese rango.")
+        else:
+            tot_cg = {r["Centro"]: int(r["Total bultos"]) for _, r in resumen_cg.iterrows()}
+            mcols = st.columns(len(CENTROS_CARGA) + 1)
+            mcols[0].metric("Total bultos", f"{tot_cg['Total']:,}".replace(",", "."))
+            for mc, (_, nombre_) in zip(mcols[1:], CENTROS_CARGA):
+                mc.metric(nombre_, f"{tot_cg[nombre_]:,}".replace(",", "."))
+            st.markdown("**Por semana**")
+            mostrar_df(por_sem_cg)
+            st.markdown("**Por día**")
+            mostrar_df(por_dia_cg)
+            with st.expander("Resumen del período"):
+                mostrar_df(resumen_cg)
+            dg1, dg2 = st.columns(2)
+            dg1.download_button("📥 Descargar carga en Excel", a_excel(hojas_carga(regs_cg)),
+                                file_name=f"Carga_{f_ini_cg.isoformat()}_a_{f_fin_cg.isoformat()}.xlsx", mime=XLSX,
+                                key="dl_carga_xlsx")
+            dg2.download_button("📄 Descargar carga en PDF", pdf_carga(regs_cg, f_ini_cg, f_fin_cg),
+                                file_name=f"Carga_{f_ini_cg.isoformat()}_a_{f_fin_cg.isoformat()}.pdf",
+                                mime="application/pdf", key="dl_carga_pdf")
