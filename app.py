@@ -29,7 +29,7 @@ st.set_page_config(
 DB_PATH = os.environ.get("YANEZ_DB", "reportes_yanez.db")
 
 # Se muestra en la barra lateral para saber qué versión del código está corriendo en Streamlit Cloud.
-APP_VERSION = "v12 · patente que retiró la carga (Easy y París)"
+APP_VERSION = "v13 · reporte de retiro de mercadería con el formato nuevo"
 
 # Cómo se busca cada columna: primero por el nombre del encabezado (exacto), luego por palabras que
 # contenga, y solo como último recurso por su posición (0 = columna A), validando que el contenido tenga sentido.
@@ -1513,6 +1513,11 @@ def a_excel(hojas, graficos=None):
             for celda in ws[1]:
                 celda.font = Font(bold=True)
                 celda.fill = PatternFill("solid", fgColor="E9EDF2")
+            for col_n, c in enumerate(d.columns, start=1):
+                v0 = next((v for v in d[c] if v is not None and not (isinstance(v, float) and pd.isna(v))), None)
+                if isinstance(v0, (datetime.date, datetime.datetime)):
+                    for fila in range(2, ws.max_row + 1):
+                        ws.cell(fila, col_n).number_format = "dd/mm/yyyy"
             for c in cols_pct:
                 col_n = list(d.columns).index(c) + 1
                 for fila in range(2, ws.max_row + 1):
@@ -2321,6 +2326,27 @@ def tabla_carga_patentes(regs):
     return pd.DataFrame(out)[cols].sort_values("Total bultos", ascending=False).reset_index(drop=True)
 
 
+def tabla_carga_detalle(regs, fechas_texto=False):
+    """Una fila por día, patente y centro (formato del reporte de Retiro de mercadería):
+    Fecha | Patente | CD | Cantidad de Carga."""
+    filas = []
+    orden = ["easy", "paris_renca", "paris_juncal"]  # mismo orden que tu reporte: Easy, París Renca, París Juncal
+    centros = sorted(CENTROS_CARGA, key=lambda c: orden.index(c[0]) if c[0] in orden else len(orden))
+    for f, v in sorted(regs, key=lambda r: r[0]):
+        for k, nombre in centros:
+            if v[k] > 0:
+                filas.append({"Fecha": f.strftime("%d/%m/%Y") if fechas_texto else f,
+                              "Patente": v.get(f"{k}_patente", "") or "", "CD": nombre, "Cantidad de Carga": v[k]})
+    return pd.DataFrame(filas, columns=["Fecha", "Patente", "CD", "Cantidad de Carga"])
+
+
+def _con_total_detalle(det):
+    """La fila TOTAL va en la columna CD, como en el reporte de Retiro de mercadería."""
+    total = pd.DataFrame([{"Fecha": None, "Patente": "", "CD": "TOTAL",
+                           "Cantidad de Carga": int(det["Cantidad de Carga"].sum())}])
+    return pd.concat([det, total], ignore_index=True)
+
+
 def tablas_carga(regs):
     """Bultos por día, por semana (lunes a domingo) y resumen del período.
     Devuelve (por_dia, por_semana, resumen) o (None, None, None) si no hay datos."""
@@ -2337,7 +2363,6 @@ def tablas_carga(regs):
         fila = {"Fecha": f.strftime("%d/%m/%Y"), "Semana": etiquetas[inicio_semana(f)]}
         fila.update({n: v[k] for k, n in CENTROS_CARGA})
         fila["Total"] = _total_dia(v)
-        fila.update({f"Patente {n}": v.get(f"{k}_patente", "") for k, n in CENTROS_CARGA})
         dias.append(fila)
     semanas = []
     for k, g_ in sorted(sems.items()):
@@ -2355,15 +2380,15 @@ def tablas_carga(regs):
     return por_dia, por_semana, resumen
 
 
-def hojas_carga(regs):
-    por_dia, por_semana, resumen = tablas_carga(regs)
+def hojas_carga(regs, hela=None):
+    """Excel del reporte de Retiro de mercadería: «Carga por patente», «Carga por semana» y, si hay, «Hela»."""
+    por_dia, por_semana, _ = tablas_carga(regs)
     if por_dia is None:
         return {}
-    hojas = {"Carga por día": _agregar_total(por_dia, "TOTAL"), "Carga por semana": _agregar_total(por_semana, "TOTAL")}
-    por_pat = tabla_carga_patentes(regs)
-    if not por_pat.empty:
-        hojas["Carga por patente"] = _agregar_total(por_pat, "TOTAL")
-    hojas["Resumen"] = resumen
+    hojas = {"Carga por patente": _con_total_detalle(tabla_carga_detalle(regs)),
+             "Carga por semana": _agregar_total(por_semana, "TOTAL")}
+    if hela is not None and not hela.empty:
+        hojas["Hela"] = hela
     return hojas
 
 
@@ -2373,11 +2398,9 @@ def pdf_carga(regs, f_ini, f_fin):
     tot = {r["Centro"]: r["Total bultos"] for _, r in resumen.iterrows()}
     metricas = [("Total bultos", _celda_pdf("x", tot["Total"]))] + [(n, _celda_pdf("x", tot[n])) for n in nombres]
     secs = [{"titulo": "Bultos retirados en el período", "metricas": metricas},
-            {"titulo": "Por semana", "df": _agregar_total(por_semana, "TOTAL")}]
-    por_pat = tabla_carga_patentes(regs)
-    if not por_pat.empty:
-        secs.append({"titulo": "Por patente", "df": _agregar_total(por_pat, "TOTAL")})
-    secs.append({"titulo": "Por día", "df": _agregar_total(por_dia, "TOTAL")})
+            {"titulo": "Por semana", "df": _agregar_total(por_semana, "TOTAL")},
+            {"titulo": "Carga por patente", "df": _con_total_detalle(tabla_carga_detalle(regs, True))},
+            {"titulo": "Por día", "df": _agregar_total(por_dia, "TOTAL")}]
     return pdf_reporte(f"Carga diaria | {f_ini:%d/%m/%Y} al {f_fin:%d/%m/%Y}", secs)
 
 
@@ -3659,9 +3682,11 @@ with tabs[7]:
                 mc.metric(nombre_, f"{tot_cg[nombre_]:,}".replace(",", "."))
             st.markdown("**Por semana**")
             mostrar_df(por_sem_cg)
+            st.markdown("**Carga por patente** (día, patente y centro)")
+            mostrar_df(tabla_carga_detalle(regs_cg, True))
             por_pat_cg = tabla_carga_patentes(regs_cg)
             if not por_pat_cg.empty:
-                st.markdown("**Por patente**")
+                st.markdown("**Total por patente**")
                 mostrar_df(por_pat_cg)
             st.markdown("**Por día**")
             mostrar_df(por_dia_cg)
