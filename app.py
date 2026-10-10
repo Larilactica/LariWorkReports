@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Gestión de Naves",
+    page_title="Gestión de Naves espaciales",
     page_icon="🛸",
     layout="wide",
 )
@@ -29,7 +29,7 @@ st.set_page_config(
 DB_PATH = os.environ.get("YANEZ_DB", "reportes_yanez.db")
 
 # Se muestra en la barra lateral para saber qué versión del código está corriendo en Streamlit Cloud.
-APP_VERSION = "v13 · reporte de retiro de mercadería con el formato nuevo"
+APP_VERSION = "v14 · NS por rango de fechas y comunas en orden nuevo"
 
 # Cómo se busca cada columna: primero por el nombre del encabezado (exacto), luego por palabras que
 # contenga, y solo como último recurso por su posición (0 = columna A), validando que el contenido tenga sentido.
@@ -506,6 +506,9 @@ def guardar_resultado(tipo, fecha, meta=None, dfs=None):
 ETIQUETAS_COMUNAS_ANTIGUAS = {'S: Coincide puntos': 'U: Coincide puntos', 'T: Compromisos BTK': 'V: Compromisos BTK', 'U: Coincide compromisos': 'W: Coincide compromisos', 'V: Usuario móvil BTK': 'X: Usuario móvil BTK', 'W: Comuna lejana según Hela': 'Y: Comuna lejana según Hela', 'X: Coincide con Hela': 'Z: Coincide con Hela', 'Y: Comunas no reconocidas': 'AA: Comunas no reconocidas', 'Z: Origen': 'AB: Origen', 'AA: Dif. puntos (BTK − Hela)': 'AC: Dif. puntos (BTK − Hela)', 'AB: Dif. compromisos (BTK − Hela)': 'AD: Dif. compromisos (BTK − Hela)', 'AC: Comunas agregadas desde BTK': 'AE: Comunas agregadas desde BTK', 'AD: Valor según Hela': 'AF: Valor según Hela', 'AE: Letra de ruta': 'AG: Letra de ruta', 'AF: Pedidos de otras rutas en esta patente': 'AH: Pedidos de otras rutas en esta patente', 'AG: Pedidos de esta ruta llevados por otra patente': 'AI: Pedidos de esta ruta llevados por otra patente', 'AH: Pedidos con la letra de esta ruta (BTK)': 'AJ: Pedidos con la letra de esta ruta (BTK)'}
 
 
+ORDEN_COLUMNAS_COMUNAS_LETRAS = ['A', 'B', 'C', 'D', 'E', 'F', 'I', 'J', 'G', 'R', 'U', 'K', 'L', 'H', 'V', 'W', 'S', 'M', 'N', 'T', 'O', 'P', 'Q', 'X', 'Y', 'Z', 'AA', 'AB', 'AC', 'AD', 'AE', 'AF', 'AG', 'AH', 'AI', 'AJ']
+
+
 def _migrar_comunas(d):
     """Pone al día el reporte de comunas guardado con el formato anterior (sin «Pedidos Easy / París»)."""
     if "S: Coincide puntos" in d.columns:
@@ -513,6 +516,10 @@ def _migrar_comunas(d):
         pos = list(d.columns).index("R: Puntos BTK") + 1
         d.insert(pos, "S: Pedidos Easy", d["M: Entregados Easy BTK"] + d["N: No Entregados Easy BTK"])
         d.insert(pos + 1, "T: Pedidos París", d["O: Entregados París BTK"] + d["P: No Entregados París BTK"])
+    # Orden de columnas vigente (los reportes guardados antes también se muestran así)
+    orden = [c for L in ORDEN_COLUMNAS_COMUNAS_LETRAS for c in d.columns if c.split(':')[0] == L]
+    if orden:
+        d = d[orden + [c for c in d.columns if c not in orden]]
     return d
 
 
@@ -1065,23 +1072,23 @@ def procesar_comunas(hela, b, fecha, nombres_pat=None):
             "D: Nombre ruta": nombre_ruta,
             "E: Comunas": comunas_txt,
             "F: Ruta BTK": ruta_btk,
-            "G: Total puntos HELA": None if pd.isna(pts) else int(pts),
-            "H: Compromisos HELA": None if pd.isna(comp) else int(comp),
             "I: Comuna Lejana": pagada,
             "J: Valor": valor,
+            "G: Total puntos HELA": None if pd.isna(pts) else int(pts),
+            "R: Puntos BTK": tot,
+            "U: Coincide puntos": s_pts,
             "K: Entregados BTK": ent,
             "L: No Entregados BTK": tot - ent,
+            "H: Compromisos HELA": None if pd.isna(comp) else int(comp),
+            "V: Compromisos BTK": comp_btk,
+            "W: Coincide compromisos": s_comp,
+            "S: Pedidos Easy": int(len(easy)),
             "M: Entregados Easy BTK": ent_easy,
             "N: No Entregados Easy BTK": int(len(easy)) - ent_easy,
+            "T: Pedidos París": int(len(paris)),
             "O: Entregados París BTK": ent_paris,
             "P: No Entregados París BTK": int(len(paris)) - ent_paris,
             "Q: NS Patente (%)": round(pct(ent, tot), 2),
-            "R: Puntos BTK": tot,
-            "S: Pedidos Easy": int(len(easy)),
-            "T: Pedidos París": int(len(paris)),
-            "U: Coincide puntos": s_pts,
-            "V: Compromisos BTK": comp_btk,
-            "W: Coincide compromisos": s_comp,
             "X: Usuario móvil BTK": usuario_btk,
             "Y: Comuna lejana según Hela": nombre_h if partes_hela else "",
             "Z: Coincide con Hela": coincide_comuna,
@@ -2869,7 +2876,7 @@ def mostrar_ns(m, dfs):
                        key=f"dl_pdf_ns_{fecha}")
 
 
-def mostrar_semanal(f_ini, f_fin):
+def mostrar_semanal(f_ini, f_fin, clave="sem"):
     datos = cargar("ns", f_ini, f_fin)
     if not datos:
         st.info("No hay reportes NS diarios guardados en ese rango. Procésalos primero en la pestaña 1.")
@@ -2936,7 +2943,20 @@ def mostrar_semanal(f_ini, f_fin):
                    "Submotivos": rank, "Detalle por día": dias})
     st.download_button("📥 Descargar reporte semanal en Excel", xls,
                        file_name=f"Reporte_Semanal_{f_ini.isoformat()}_a_{f_fin.isoformat()}.xlsx",
-                       mime=XLSX, key="dl_sem")
+                       mime=XLSX, key=f"dl_{clave}")
+    try:
+        pdf = pdf_reporte(f"NS del {f_ini:%d/%m/%Y} al {f_fin:%d/%m/%Y}", [
+            {"titulo": "NS Fecha Compromiso por día", "df": tabla_fc(datos, texto=True)},
+            {"titulo": "Resumen del rango", "df": resumen},
+            {"titulo": "NS por día", "df": dias},
+            {"titulo": "Submotivos de no entrega", "df": rank if not rank.empty else None,
+             "nota": "" if not rank.empty else "No se registraron no entregas en el rango."},
+        ])
+        st.download_button("📄 Descargar reporte del rango en PDF", pdf,
+                           file_name=f"Reporte_NS_{f_ini.isoformat()}_a_{f_fin.isoformat()}.pdf",
+                           mime="application/pdf", key=f"dlpdf_{clave}")
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"No se pudo armar el PDF del rango: {e}")
 
 
 # =====================================================================
@@ -2981,58 +3001,65 @@ tabs = st.tabs([
 # ---------------------------------------------------------------------
 with tabs[0]:
     st.header("1. Reporte Nivel de Servicio (NS) Diario")
-    fecha_ns = st.date_input("Fecha a la que corresponde este archivo BTK", HOY, key="f_ns")
-    previo_ns = cargar("ns", fecha_ns, fecha_ns)
-    prev_meta = previo_ns[0][1] if previo_ns else {}
-
-    up_btk = bloque_archivo("btk_yanez", "Archivo BTK YÁÑEZ", fecha_ns, "u_btk_main", "f_ns")
-
-    st.subheader("📊 Datos Fecha Compromiso y Retiros (ingreso manual)")
-    col_e, col_p = st.columns(2)
-    with col_e:
-        st.markdown("**EASY - Fecha Compromiso**")
-        fc_easy_tot = num("Totales FC Easy", "fc_easy_tot", fecha_ns, prev_meta)
-        fc_easy_ent = num("Entregados FC Easy", "fc_easy_ent", fecha_ns, prev_meta)
-        aviso_no_entregados("FC Easy", fc_easy_tot, fc_easy_ent)
-        st.markdown("**EASY - Retiros**")
-        ret_easy_tot = num("Totales Retiros Easy", "ret_easy_tot", fecha_ns, prev_meta)
-        ret_easy_ent = num("Entregados / recogidos Retiros Easy", "ret_easy_ent", fecha_ns, prev_meta)
-        aviso_no_entregados("Retiros Easy", ret_easy_tot, ret_easy_ent)
-    with col_p:
-        st.markdown("**PARÍS - Fecha Compromiso**")
-        fc_paris_tot = num("Totales FC París", "fc_paris_tot", fecha_ns, prev_meta)
-        fc_paris_ent = num("Entregados FC París", "fc_paris_ent", fecha_ns, prev_meta)
-        aviso_no_entregados("FC París", fc_paris_tot, fc_paris_ent)
-        st.markdown("**PARÍS - Retiros / Recogidos**")
-        ret_paris_tot = num("Totales Retiros París", "ret_paris_tot", fecha_ns, prev_meta)
-        ret_paris_ent = num("Recogidos Retiros París", "ret_paris_ent", fecha_ns, prev_meta)
-        aviso_no_entregados("Retiros París (no recogidos)", ret_paris_tot, ret_paris_ent)
-
-    if st.button("Procesar y Guardar NS Diario", key="b_proc_ns"):
-        arch = resolver_archivo("btk_yanez", fecha_ns, up_btk)
-        if arch is None:
-            st.error("Sube el archivo BTK YÁÑEZ (o guarda uno antes para esta fecha).")
-        else:
-            try:
-                b = preparar_btk(leer_archivo(*arch))
-                manual = {
-                    "fc_easy_tot": fc_easy_tot, "fc_easy_ent": fc_easy_ent,
-                    "fc_paris_tot": fc_paris_tot, "fc_paris_ent": fc_paris_ent,
-                    "ret_easy_tot": ret_easy_tot, "ret_easy_ent": ret_easy_ent,
-                    "ret_paris_tot": ret_paris_tot, "ret_paris_ent": ret_paris_ent,
-                }
-                meta, dfs = procesar_ns(b, fecha_ns, manual)
-                meta["archivo_btk"] = arch[0]
-                guardar_resultado("ns", fecha_ns, meta, dfs)
-                st.success(f"¡Día {fecha_ns:%d/%m/%Y} procesado y guardado!")
-            except Exception as e:  # noqa: BLE001
-                st.error(f"No se pudo procesar el archivo: {e}")
-
-    res_ns = cargar("ns", fecha_ns, fecha_ns)
-    if res_ns:
-        mostrar_ns(res_ns[0][1], res_ns[0][2])
+    vista_ns = st.radio("Ver el reporte de", ["Un día (subir / procesar)", "Rango de fechas (ej. del 01 al 05)"],
+                        horizontal=True, key="vista_ns")
+    if vista_ns.startswith("Rango"):
+        rango_ns = selector_rango("nsr")
+        if rango_ns:
+            mostrar_semanal(*rango_ns, clave="nsr")
     else:
-        st.info("Todavía no hay un reporte guardado para esta fecha.")
+        fecha_ns = st.date_input("Fecha a la que corresponde este archivo BTK", HOY, key="f_ns")
+        previo_ns = cargar("ns", fecha_ns, fecha_ns)
+        prev_meta = previo_ns[0][1] if previo_ns else {}
+
+        up_btk = bloque_archivo("btk_yanez", "Archivo BTK YÁÑEZ", fecha_ns, "u_btk_main", "f_ns")
+
+        st.subheader("📊 Datos Fecha Compromiso y Retiros (ingreso manual)")
+        col_e, col_p = st.columns(2)
+        with col_e:
+            st.markdown("**EASY - Fecha Compromiso**")
+            fc_easy_tot = num("Totales FC Easy", "fc_easy_tot", fecha_ns, prev_meta)
+            fc_easy_ent = num("Entregados FC Easy", "fc_easy_ent", fecha_ns, prev_meta)
+            aviso_no_entregados("FC Easy", fc_easy_tot, fc_easy_ent)
+            st.markdown("**EASY - Retiros**")
+            ret_easy_tot = num("Totales Retiros Easy", "ret_easy_tot", fecha_ns, prev_meta)
+            ret_easy_ent = num("Entregados / recogidos Retiros Easy", "ret_easy_ent", fecha_ns, prev_meta)
+            aviso_no_entregados("Retiros Easy", ret_easy_tot, ret_easy_ent)
+        with col_p:
+            st.markdown("**PARÍS - Fecha Compromiso**")
+            fc_paris_tot = num("Totales FC París", "fc_paris_tot", fecha_ns, prev_meta)
+            fc_paris_ent = num("Entregados FC París", "fc_paris_ent", fecha_ns, prev_meta)
+            aviso_no_entregados("FC París", fc_paris_tot, fc_paris_ent)
+            st.markdown("**PARÍS - Retiros / Recogidos**")
+            ret_paris_tot = num("Totales Retiros París", "ret_paris_tot", fecha_ns, prev_meta)
+            ret_paris_ent = num("Recogidos Retiros París", "ret_paris_ent", fecha_ns, prev_meta)
+            aviso_no_entregados("Retiros París (no recogidos)", ret_paris_tot, ret_paris_ent)
+
+        if st.button("Procesar y Guardar NS Diario", key="b_proc_ns"):
+            arch = resolver_archivo("btk_yanez", fecha_ns, up_btk)
+            if arch is None:
+                st.error("Sube el archivo BTK YÁÑEZ (o guarda uno antes para esta fecha).")
+            else:
+                try:
+                    b = preparar_btk(leer_archivo(*arch))
+                    manual = {
+                        "fc_easy_tot": fc_easy_tot, "fc_easy_ent": fc_easy_ent,
+                        "fc_paris_tot": fc_paris_tot, "fc_paris_ent": fc_paris_ent,
+                        "ret_easy_tot": ret_easy_tot, "ret_easy_ent": ret_easy_ent,
+                        "ret_paris_tot": ret_paris_tot, "ret_paris_ent": ret_paris_ent,
+                    }
+                    meta, dfs = procesar_ns(b, fecha_ns, manual)
+                    meta["archivo_btk"] = arch[0]
+                    guardar_resultado("ns", fecha_ns, meta, dfs)
+                    st.success(f"¡Día {fecha_ns:%d/%m/%Y} procesado y guardado!")
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"No se pudo procesar el archivo: {e}")
+
+        res_ns = cargar("ns", fecha_ns, fecha_ns)
+        if res_ns:
+            mostrar_ns(res_ns[0][1], res_ns[0][2])
+        else:
+            st.info("Todavía no hay un reporte guardado para esta fecha.")
 
 # ---------------------------------------------------------------------
 # TAB 2: COMUNAS
