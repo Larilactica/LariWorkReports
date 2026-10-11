@@ -2436,9 +2436,10 @@ BITACORA_FECHA = datetime.date(2999, 12, 30)
 BITACORA_COLS = ["Fecha", "Identificador ruta", "Patente", "Guía", "Cliente", "Número de intentos", "Estado",
                  "Subestado", "Usuario móvil", "Nombre cliente", "Dirección cliente", "F Compromiso",
                  "Reprogramación", "Reingreso", "Estado Actual", "SubEstado actual", "F Entrega Final", "Comuna",
-                 "Comuna correcta", "Teléfono correcto", "Observación", "Correo SI / NO", "Codigo", "Ejecutivo"]
+                 "Comuna correcta", "Teléfono correcto", "Observación", "Correo SI / NO", "Codigo", "Ejecutivo",
+                 "Datos BTK"]
 BITACORA_FECHAS = ["Fecha", "F Compromiso", "Reprogramación", "F Entrega Final"]
-BITACORA_TEXTOS = [c for c in BITACORA_COLS if c not in BITACORA_FECHAS + ["Reingreso", "Número de intentos"]]
+BITACORA_TEXTOS = [c for c in BITACORA_COLS if c not in BITACORA_FECHAS + ["Reingreso", "Número de intentos", "Datos BTK"]]
 # Columnas del Excel (A a V): «Reingreso» no es una columna aparte, se marca en Reprogramación; el «Estado Actual»
 # interno solo sirve para saber si el pedido terminó (entregado / reingresado)
 BITACORA_EXCEL = ["Fecha", "Identificador ruta", "Patente", "Guía", "Cliente", "Número de intentos", "Estado",
@@ -2483,7 +2484,9 @@ def _normalizar_bitacora(df):
     df = df.copy() if df is not None else pd.DataFrame()
     for c in BITACORA_COLS:
         if c not in df.columns:
-            df[c] = False if c == "Reingreso" else (None if c == "Número de intentos" else "")
+            # «Datos BTK»: los pedidos guardados antes de existir esta columna ya venían del BTK
+            df[c] = (False if c == "Reingreso" else True if c == "Datos BTK"
+                     else None if c == "Número de intentos" else "")
     df = df[BITACORA_COLS]
     for c in BITACORA_TEXTOS + BITACORA_FECHAS:
         df[c] = df[c].map(lambda v: "" if v is None or (not isinstance(v, str) and pd.isna(v)) else str(v).strip())
@@ -2491,6 +2494,7 @@ def _normalizar_bitacora(df):
     for c in BITACORA_FECHAS:
         df[c] = df[c].map(_iso)
     df["Reingreso"] = df["Reingreso"].map(lambda v: bool(v) if v is not None and not pd.isna(v) else False)
+    df["Datos BTK"] = df["Datos BTK"].map(lambda v: bool(v) if v is not None and not pd.isna(v) else True)
     df["Número de intentos"] = pd.to_numeric(df["Número de intentos"], errors="coerce")
     df.loc[df["Estado Actual"].eq(""), "Estado Actual"] = PENDIENTE
     return df.reset_index(drop=True)
@@ -2509,12 +2513,38 @@ def guardar_bitacora(df):
                       {"bitacora": df})
 
 
+def _campos_btk(b, r):
+    """Los datos de una orden que vienen del BTK (r = su fila en el BTK preparado)."""
+    intentos = r["INTENTOS"] if "INTENTOS" in b.columns else None
+    return {
+        "Identificador ruta": r["RUTA"], "Patente": r["PATENTE"], "Cliente": r["CLIENTE_TXT"],
+        "Número de intentos": None if intentos is None or pd.isna(intentos) else int(intentos),
+        "Estado": r["ESTADO_TXT"], "Subestado": r["SUBESTADO"], "Usuario móvil": r["USUARIO"],
+        "Nombre cliente": r["NOMBRE_CLIENTE"] if "NOMBRE_CLIENTE" in b.columns else "",
+        "Dirección cliente": r["DIRECCION"] if "DIRECCION" in b.columns else "",
+        "F Compromiso": _iso(r["F_COMP"]), "Comuna": r["COMUNA"],
+        "Codigo": r["CODIGO"] if "CODIGO" in b.columns else "",
+        "Ejecutivo": r["EJECUTIVO"] if "EJECUTIVO" in b.columns else "",
+    }
+
+
+def _indice_ordenes(b):
+    """orden → posición de su última fila en el BTK (la última fila de la orden es la que manda)."""
+    return {_norm_orden(o): i for i, o in enumerate(b["ORDEN"])}
+
+
+def _fila_bitacora(fecha, orden, obs, campos=None):
+    f = {c: "" for c in BITACORA_COLS}
+    f.update({"Fecha": fecha.isoformat(), "Guía": orden, "Reingreso": False, "Estado Actual": PENDIENTE,
+              "Observación": obs, "Número de intentos": None, "Datos BTK": campos is not None})
+    f.update(campos or {})
+    return f
+
+
 def filas_bitacora_desde_btk(b, fecha, pares):
     """pares = [(orden, observación)]. Busca cada orden en el BTK de esa fecha y arma la fila de la bitácora.
-    Devuelve (filas, no_encontradas, ya_entregadas). La última fila de la orden en el BTK es la que manda."""
-    ultima = {}
-    for i, o in enumerate(b["ORDEN"]):
-        ultima[_norm_orden(o)] = i
+    Devuelve (filas, no_encontradas, ya_entregadas)."""
+    ultima = _indice_ordenes(b)
     filas, no_enc, entregadas, vistas = [], [], [], set()
     for orden, obs in pares:
         if not orden or orden in vistas:
@@ -2528,20 +2558,53 @@ def filas_bitacora_desde_btk(b, fecha, pares):
         if bool(r["ENTREGADO"]):
             entregadas.append(orden)
             continue
-        intentos = r["INTENTOS"] if "INTENTOS" in b.columns else None
-        filas.append({
-            "Fecha": fecha.isoformat(), "Identificador ruta": r["RUTA"], "Patente": r["PATENTE"], "Guía": orden,
-            "Cliente": r["CLIENTE_TXT"], "Número de intentos": None if pd.isna(intentos) else int(intentos),
-            "Estado": r["ESTADO_TXT"], "Subestado": r["SUBESTADO"], "Usuario móvil": r["USUARIO"],
-            "Nombre cliente": r["NOMBRE_CLIENTE"] if "NOMBRE_CLIENTE" in b.columns else "",
-            "Dirección cliente": r["DIRECCION"] if "DIRECCION" in b.columns else "",
-            "F Compromiso": _iso(r["F_COMP"]), "Reprogramación": "", "Reingreso": False,
-            "Estado Actual": PENDIENTE, "SubEstado actual": "", "F Entrega Final": "", "Comuna": r["COMUNA"],
-            "Comuna correcta": "", "Teléfono correcto": "", "Observación": obs, "Correo SI / NO": "",
-            "Codigo": r["CODIGO"] if "CODIGO" in b.columns else "",
-            "Ejecutivo": r["EJECUTIVO"] if "EJECUTIVO" in b.columns else "",
-        })
+        filas.append(_fila_bitacora(fecha, orden, obs, _campos_btk(b, r)))
     return filas, no_enc, entregadas
+
+
+def filas_bitacora_manuales(fecha, pares):
+    """Órdenes ingresadas sin BTK todavía: solo fecha, guía y observación. Los datos se completan después."""
+    vistas, filas = set(), []
+    for orden, obs in pares:
+        if orden and orden not in vistas:
+            vistas.add(orden)
+            filas.append(_fila_bitacora(fecha, orden, obs))
+    return filas
+
+
+def completar_bitacora(bit, b, fecha):
+    """Completa con el BTK de `fecha` los pedidos de ese día que se ingresaron sin datos del BTK.
+    Devuelve (bitácora, n_completados, no_encontrados, ya_entregados)."""
+    bit = _normalizar_bitacora(bit)
+    ultima = _indice_ordenes(b)
+    falta = bit[bit["Fecha"].eq(fecha.isoformat()) & ~bit["Datos BTK"]]
+    n, no_enc, entregadas = 0, [], []
+    for idx in falta.index:
+        orden = bit.at[idx, "Guía"]
+        i = ultima.get(orden)
+        if i is None:
+            no_enc.append(orden)
+            continue
+        r = b.iloc[i]
+        if bool(r["ENTREGADO"]):
+            entregadas.append(orden)
+            continue
+        for k, v in _campos_btk(b, r).items():
+            bit.at[idx, k] = v
+        bit.at[idx, "Datos BTK"] = True
+        n += 1
+    return _normalizar_bitacora(bit), n, no_enc, entregadas
+
+
+def btk_guardado_preparado(fecha):
+    """El BTK guardado de esa fecha ya preparado, o None si no hay o no se puede leer."""
+    arch = archivo_guardado("btk_yanez", fecha)
+    if arch is None:
+        return None
+    try:
+        return preparar_btk(leer_archivo(*arch))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def agregar_a_bitacora(bit, filas):
@@ -2569,7 +2632,13 @@ def actualizar_bitacora(bit):
     """Busca las órdenes pendientes en los BTK guardados de los días posteriores y deja el estado y subestado más actuales.
     Entregado / Recogido finaliza el pedido (F Entrega Final = el día de ese BTK). Devuelve (bitácora, resumen)."""
     bit = _normalizar_bitacora(bit)
-    res = {"archivos": 0, "actualizadas": 0, "finalizadas": 0}
+    res = {"archivos": 0, "actualizadas": 0, "finalizadas": 0, "completadas": 0}
+    for f in sorted(set(bit.loc[~bit["Datos BTK"], "Fecha"])):  # pedidos ingresados antes de tener su BTK
+        d = _a_fecha(f)
+        b0 = btk_guardado_preparado(d) if d else None
+        if b0 is not None:
+            bit, n_c, _, _ = completar_bitacora(bit, b0, d)
+            res["completadas"] += n_c
     pend = bit[~bit["Estado Actual"].map(es_finalizado) & ~bit["Reingreso"]]
     if pend.empty:
         return bit, res
@@ -2588,9 +2657,7 @@ def actualizar_bitacora(bit):
         except Exception:  # noqa: BLE001
             continue
         res["archivos"] += 1
-        ultima = {}
-        for i, o in enumerate(b["ORDEN"]):
-            ultima[_norm_orden(o)] = i
+        ultima = _indice_ordenes(b)
         for idx in pend.index:
             i = ultima.get(bit.at[idx, "Guía"])
             if i is None:
@@ -2614,7 +2681,7 @@ def actualizar_bitacora_guardada():
     if bit.empty:
         return None
     nuevo, res = actualizar_bitacora(bit)
-    if res["actualizadas"] or res["finalizadas"]:
+    if res["actualizadas"] or res["finalizadas"] or res["completadas"]:
         guardar_bitacora(nuevo)
     return res
 
@@ -3407,9 +3474,10 @@ with tabs[0]:
                     st.success(f"¡Día {fecha_ns:%d/%m/%Y} procesado y guardado!")
                     try:  # los pedidos de la bitácora se ponen al día con este BTK
                         res_bit = actualizar_bitacora_guardada()
-                        if res_bit and (res_bit["actualizadas"] or res_bit["finalizadas"]):
-                            st.info(f"📋 Bitácora de no entregados actualizada: {res_bit['actualizadas']} pedido(s) "
-                                    f"con estado nuevo, {res_bit['finalizadas']} finalizado(s).")
+                        if res_bit and (res_bit["actualizadas"] or res_bit["finalizadas"] or res_bit["completadas"]):
+                            st.info(f"📋 Bitácora de no entregados actualizada: {res_bit['completadas']} pedido(s) "
+                                    f"completado(s) con este BTK, {res_bit['actualizadas']} con estado nuevo, "
+                                    f"{res_bit['finalizadas']} finalizado(s).")
                     except Exception:  # noqa: BLE001
                         pass
                 except Exception as e:  # noqa: BLE001
@@ -4116,22 +4184,36 @@ with tabs[8]:
         column_config={"Guía (n° de orden)": st.column_config.TextColumn(width="medium"),
                        "Observación (por qué no se entregó)": st.column_config.TextColumn(width="large")})
     st.caption("Escribe las órdenes o copia dos columnas desde Excel (orden y observación) y pégalas aquí. "
-               "La observación es opcional; la puedes completar después en el seguimiento.")
-    if st.button("Agregar a la bitácora", key="b_bit_add"):
+               "La observación es opcional; la puedes completar después en el seguimiento. Si todavía no tienes el "
+               "BTK de ese día, igual se guardan y los datos del BTK se completan cuando lo subas.")
+    c_add1, c_add2 = st.columns(2)
+    btn_add = c_add1.button("Agregar a la bitácora", key="b_bit_add")
+    btn_comp = c_add2.button("📎 Completar con el BTK de esta fecha", key="b_bit_comp",
+                             help="Para los pedidos que ingresaste antes de tener el BTK de ese día.")
+    if btn_add:
         pares = [(_norm_orden(g_), "" if pd.isna(o_) else str(o_).strip())
                  for g_, o_ in zip(ed_add.iloc[:, 0], ed_add.iloc[:, 1]) if _norm_orden(g_)]
         if not pares:
             st.error("Ingresa al menos un número de orden.")
         else:
             arch_bit = resolver_archivo("btk_yanez", f_bit, up_bit)
-            if arch_bit is None:
-                st.error("Sube el archivo BTK YÁÑEZ de esa fecha (o guarda uno antes para esta fecha).")
-            else:
-                try:
+            try:
+                msgs = []
+                if arch_bit is None:
+                    # Todavía no hay BTK de esa fecha: se guarda lo manual y los datos se completan después
+                    filas_b = filas_bitacora_manuales(f_bit, pares)
+                    bit, n_nuevas, n_ya = agregar_a_bitacora(bit, filas_b)
+                    guardar_bitacora(bit)
+                    texto = (f"Se guardaron {n_nuevas} pedido(s) del {f_bit:%d/%m/%Y} con su observación, sin datos "
+                             "del BTK todavía. Cuando tengas el BTK de esa fecha, súbelo y se completan solos "
+                             "(o usa «Completar con el BTK de esta fecha»).")
+                    if n_ya:
+                        texto += f" {n_ya} ya estaba(n) y solo se actualizó su observación."
+                    msgs.append(("success", texto))
+                else:
                     b_bit = preparar_btk(leer_archivo(*arch_bit))
                     filas_b, no_enc_b, entreg_b = filas_bitacora_desde_btk(b_bit, f_bit, pares)
                     bit, n_nuevas, n_ya = agregar_a_bitacora(bit, filas_b)
-                    msgs = []
                     if filas_b:
                         guardar_bitacora(bit)
                         res_a = actualizar_bitacora_guardada()
@@ -4147,11 +4229,36 @@ with tabs[8]:
                     if entreg_b:
                         msgs.append(("warning", "Figuran como entregadas/recogidas ese día (no se agregaron): "
                                      + ", ".join(entreg_b)))
-                    st.session_state["msg_bit"] = msgs
-                    st.session_state["n_bit_add"] = n_add + 1
-                    st.rerun()
-                except Exception as e:  # noqa: BLE001
-                    st.error(f"No se pudo leer el archivo BTK: {e}")
+                st.session_state["msg_bit"] = msgs
+                st.session_state["n_bit_add"] = n_add + 1
+                st.rerun()
+            except Exception as e:  # noqa: BLE001
+                st.error(f"No se pudo agregar: {e}")
+    if btn_comp:
+        arch_bit = resolver_archivo("btk_yanez", f_bit, up_bit)
+        if arch_bit is None:
+            st.error("Sube el archivo BTK YÁÑEZ de esa fecha (o guarda uno antes para esta fecha).")
+        else:
+            try:
+                b_bit = preparar_btk(leer_archivo(*arch_bit))
+                bit, n_comp, no_enc_c, entreg_c = completar_bitacora(bit, b_bit, f_bit)
+                msgs = []
+                if n_comp:
+                    guardar_bitacora(bit)
+                    actualizar_bitacora_guardada()
+                    msgs.append(("success", f"Se completaron {n_comp} pedido(s) del {f_bit:%d/%m/%Y} con el BTK."))
+                elif not (no_enc_c or entreg_c):
+                    msgs.append(("info", f"No hay pedidos del {f_bit:%d/%m/%Y} esperando datos del BTK."))
+                if no_enc_c:
+                    msgs.append(("warning", "Siguen sin datos porque no están en ese BTK (revisa el número): "
+                                 + ", ".join(no_enc_c)))
+                if entreg_c:
+                    msgs.append(("warning", "Figuran como entregadas/recogidas ese día en el BTK: "
+                                 + ", ".join(entreg_c) + ". Quítalas de la bitácora si no corresponden."))
+                st.session_state["msg_bit"] = msgs
+                st.rerun()
+            except Exception as e:  # noqa: BLE001
+                st.error(f"No se pudo completar: {e}")
 
     # ---------- 2. Seguimiento ----------
     st.markdown("---")
@@ -4163,15 +4270,22 @@ with tabs[8]:
             with st.spinner("Buscando las órdenes en los BTK guardados…"):
                 try:
                     nuevo_b, res_u = actualizar_bitacora(bit)
-                    if res_u["actualizadas"] or res_u["finalizadas"]:
+                    if res_u["actualizadas"] or res_u["finalizadas"] or res_u["completadas"]:
                         guardar_bitacora(nuevo_b)
                     st.session_state["msg_bit"] = [(
-                        "success" if res_u["actualizadas"] else "info",
-                        f"Revisé {res_u['archivos']} archivo(s) BTK posteriores: {res_u['actualizadas']} pedido(s) "
-                        f"con estado nuevo, {res_u['finalizadas']} finalizado(s).")]
+                        "success" if (res_u["actualizadas"] or res_u["completadas"]) else "info",
+                        f"Revisé {res_u['archivos']} archivo(s) BTK posteriores: {res_u['completadas']} pedido(s) "
+                        f"completado(s) con su BTK, {res_u['actualizadas']} con estado nuevo, "
+                        f"{res_u['finalizadas']} finalizado(s).")]
                     st.rerun()
                 except Exception as e:  # noqa: BLE001
                     st.error(f"No se pudo actualizar: {e}")
+
+        sin_btk = bit[~bit["Datos BTK"]]
+        if not sin_btk.empty:
+            fechas_sin = ", ".join(sorted({_a_fecha(f_).strftime("%d/%m") for f_ in sin_btk["Fecha"]}))
+            st.warning(f"⏳ {len(sin_btk)} pedido(s) esperan el BTK de su fecha ({fechas_sin}) para completar sus "
+                       "datos. Se completan solos al procesar ese BTK en la pestaña 1, o con «Completar con el BTK».")
 
         fmin, fmax = _a_fecha(bit["Fecha"].min()), _a_fecha(bit["Fecha"].max())
         fc1, fc2, fc3, fc4 = st.columns([1, 1, 1, 1.4])
