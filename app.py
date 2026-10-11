@@ -1,6 +1,7 @@
 import datetime
 import hmac
 import base64
+import hashlib
 import gzip
 import io
 import json
@@ -16,7 +17,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Gestión de Naves espaciales",
+    page_title="Gestión de Naves",
     page_icon="🛸",
     layout="wide",
 )
@@ -29,7 +30,7 @@ st.set_page_config(
 DB_PATH = os.environ.get("YANEZ_DB", "reportes_yanez.db")
 
 # Se muestra en la barra lateral para saber qué versión del código está corriendo en Streamlit Cloud.
-APP_VERSION = "v14 · NS por rango de fechas y comunas en orden nuevo"
+APP_VERSION = "v15 · bitácora de pedidos no entregados"
 
 # Cómo se busca cada columna: primero por el nombre del encabezado (exacto), luego por palabras que
 # contenga, y solo como último recurso por su posición (0 = columna A), validando que el contenido tenga sentido.
@@ -315,23 +316,23 @@ class AlmacenSQLite:
     def listar_fechas(self):
         with closing(self._conn()) as con:
             rows = con.execute("SELECT fecha FROM archivos UNION SELECT fecha FROM resultados "
-                               "WHERE tipo != 'config' ORDER BY fecha DESC").fetchall()
+                               "WHERE tipo NOT IN ('config', 'bitacora') ORDER BY fecha DESC").fetchall()
         return [r[0] for r in rows]
 
     def borrar_fecha(self, fecha):
         with closing(self._conn()) as con:
             con.execute("DELETE FROM archivos WHERE fecha=?", (fecha,))
-            con.execute("DELETE FROM resultados WHERE fecha=? AND tipo != 'config'", (fecha,))
+            con.execute("DELETE FROM resultados WHERE fecha=? AND tipo NOT IN ('config', 'bitacora')", (fecha,))
             con.commit()
 
     def limpiar_antes_de(self, fecha):
         """Borra todo lo anterior a la fecha (no toca la configuración). Devuelve (archivos, reportes)."""
         with closing(self._conn()) as con:
             n_a = con.execute("SELECT COUNT(*) FROM archivos WHERE fecha < ?", (fecha,)).fetchone()[0]
-            n_r = con.execute("SELECT COUNT(*) FROM resultados WHERE fecha < ? AND tipo != 'config'",
+            n_r = con.execute("SELECT COUNT(*) FROM resultados WHERE fecha < ? AND tipo NOT IN ('config', 'bitacora')",
                               (fecha,)).fetchone()[0]
             con.execute("DELETE FROM archivos WHERE fecha < ?", (fecha,))
-            con.execute("DELETE FROM resultados WHERE fecha < ? AND tipo != 'config'", (fecha,))
+            con.execute("DELETE FROM resultados WHERE fecha < ? AND tipo NOT IN ('config', 'bitacora')", (fecha,))
             con.commit()
         return n_a, n_r
 
@@ -407,23 +408,23 @@ class AlmacenSupabase:
         fechas = set()
         for r in self._paginar(lambda: self.db.table("archivos").select("fecha").order("fecha")):
             fechas.add(r["fecha"])
-        for r in self._paginar(lambda: self.db.table("resultados").select("fecha").neq("tipo", "config")
+        for r in self._paginar(lambda: self.db.table("resultados").select("fecha").neq("tipo", "config").neq("tipo", "bitacora")
                                .order("fecha")):
             fechas.add(r["fecha"])
         return sorted(fechas, reverse=True)
 
     def borrar_fecha(self, fecha):
         self.db.table("archivos").delete().eq("fecha", fecha).execute()
-        self.db.table("resultados").delete().eq("fecha", fecha).neq("tipo", "config").execute()
+        self.db.table("resultados").delete().eq("fecha", fecha).neq("tipo", "config").neq("tipo", "bitacora").execute()
 
     def limpiar_antes_de(self, fecha):
         """Borra todo lo anterior a la fecha (no toca la configuración). Devuelve (archivos, reportes)."""
         n_a = len(self._paginar(lambda: self.db.table("archivos").select("tipo,fecha").lt("fecha", fecha)
                                 .order("fecha")))
         n_r = len(self._paginar(lambda: self.db.table("resultados").select("tipo,fecha").lt("fecha", fecha)
-                                .neq("tipo", "config").order("fecha")))
+                                .neq("tipo", "config").neq("tipo", "bitacora").order("fecha")))
         self.db.table("archivos").delete().lt("fecha", fecha).execute()
-        self.db.table("resultados").delete().lt("fecha", fecha).neq("tipo", "config").execute()
+        self.db.table("resultados").delete().lt("fecha", fecha).neq("tipo", "config").neq("tipo", "bitacora").execute()
         return n_a, n_r
 
     def volcar(self):
@@ -799,6 +800,21 @@ def preparar_btk(df):
     b["FECHA"] = parsear_fechas(col("FECHA"))
     b["CONDUCTOR"] = txt(col("CONDUCTOR"))
     b["LETRA"] = b["CONDUCTOR"].str.extract(r"(?i)\bruta\s+([A-Z]{1,2})\b")[0].str.upper().fillna("")
+    # Datos extra que usa la bitácora de no entregados (se buscan por encabezado; si no están quedan vacíos)
+    _claves_enc = {limpiar_texto(c): i for i, c in reversed(list(enumerate(df.columns)))}
+
+    def _extra(*nombres):
+        for n in nombres:
+            i = _claves_enc.get(limpiar_texto(n))
+            if i is not None:
+                return df.iloc[:, i]
+        return pd.Series([None] * len(df), index=df.index, dtype="object")
+
+    b["NOMBRE_CLIENTE"] = txt(_extra("Nombre cliente"))
+    b["DIRECCION"] = txt(_extra("Dirección cliente", "Direccion cliente"))
+    b["CODIGO"] = txt(_extra("Codigo", "Código"))
+    b["EJECUTIVO"] = txt(_extra("Nombre Ejecutivo"))
+    b["INTENTOS"] = pd.to_numeric(_extra("# intentos", "Número de intentos", "Numero de intentos"), errors="coerce")
     b["ES_EASY"] = b["CLIENTE"].str.contains("EASY", na=False)
     b["ES_PARIS"] = b["CLIENTE"].str.contains("PARIS", na=False)
     b["ENTREGADO"] = b["ESTADO"].isin(ESTADOS_GESTIONADOS)
@@ -2411,6 +2427,334 @@ def pdf_carga(regs, f_ini, f_fin):
     return pdf_reporte(f"Carga diaria | {f_ini:%d/%m/%Y} al {f_fin:%d/%m/%Y}", secs)
 
 
+# =====================================================================
+# BITÁCORA DE PEDIDOS NO ENTREGADOS (trazabilidad)
+# =====================================================================
+# Se guarda completa en un solo registro con una fecha "reservada" (como la configuración), así la limpieza
+# automática mensual y el borrado por día no la tocan: un pedido pendiente no debe perderse al cambiar de mes.
+BITACORA_FECHA = datetime.date(2999, 12, 30)
+BITACORA_COLS = ["Fecha", "Identificador ruta", "Patente", "Guía", "Cliente", "Número de intentos", "Estado",
+                 "Subestado", "Usuario móvil", "Nombre cliente", "Dirección cliente", "F Compromiso",
+                 "Reprogramación", "Reingreso", "Estado Actual", "SubEstado actual", "F Entrega Final", "Comuna",
+                 "Comuna correcta", "Teléfono correcto", "Observación", "Correo SI / NO", "Codigo", "Ejecutivo"]
+BITACORA_FECHAS = ["Fecha", "F Compromiso", "Reprogramación", "F Entrega Final"]
+BITACORA_TEXTOS = [c for c in BITACORA_COLS if c not in BITACORA_FECHAS + ["Reingreso", "Número de intentos"]]
+# Columnas del Excel (A a V): «Reingreso» no es una columna aparte, se marca en Reprogramación; el «Estado Actual»
+# interno solo sirve para saber si el pedido terminó (entregado / reingresado)
+BITACORA_EXCEL = ["Fecha", "Identificador ruta", "Patente", "Guía", "Cliente", "Número de intentos", "Estado",
+                  "Subestado", "Usuario móvil", "Nombre cliente", "Dirección cliente", "F Compromiso",
+                  "Reprogramación", "SubEstado actual", "F Entrega Final", "Comuna", "Comuna correcta",
+                  "Teléfono correcto", "Observación", "Correo SI / NO", "Codigo", "Ejecutivo"]
+ESTADOS_FINALES_BIT = {"ENTREGADO", "RECOGIDO", "REINGRESADO"}
+PENDIENTE = "Pendiente"
+
+
+def _norm_orden(x):
+    if x is None or (not isinstance(x, str) and pd.isna(x)):
+        return ""
+    return re.sub(r"\.0$", "", str(x).strip().lstrip("'"))
+
+
+def _iso(x):
+    """Fecha → 'AAAA-MM-DD' (vacío si no hay fecha)."""
+    if x is None or (not isinstance(x, str) and pd.isna(x)):
+        return ""
+    if isinstance(x, str):
+        return x.strip()[:10]
+    return x.isoformat()[:10]
+
+
+def _a_fecha(s):
+    try:
+        return datetime.date.fromisoformat(s[:10]) if isinstance(s, str) and s.strip() else None
+    except ValueError:
+        return None
+
+
+def es_finalizado(estado_actual):
+    return limpiar_texto(estado_actual) in ESTADOS_FINALES_BIT
+
+
+def clave_bitacora(df):
+    return df["Fecha"].astype(str) + "|" + df["Guía"].astype(str)
+
+
+def _normalizar_bitacora(df):
+    df = df.copy() if df is not None else pd.DataFrame()
+    for c in BITACORA_COLS:
+        if c not in df.columns:
+            df[c] = False if c == "Reingreso" else (None if c == "Número de intentos" else "")
+    df = df[BITACORA_COLS]
+    for c in BITACORA_TEXTOS + BITACORA_FECHAS:
+        df[c] = df[c].map(lambda v: "" if v is None or (not isinstance(v, str) and pd.isna(v)) else str(v).strip())
+    df["Guía"] = df["Guía"].map(_norm_orden)
+    for c in BITACORA_FECHAS:
+        df[c] = df[c].map(_iso)
+    df["Reingreso"] = df["Reingreso"].map(lambda v: bool(v) if v is not None and not pd.isna(v) else False)
+    df["Número de intentos"] = pd.to_numeric(df["Número de intentos"], errors="coerce")
+    df.loc[df["Estado Actual"].eq(""), "Estado Actual"] = PENDIENTE
+    return df.reset_index(drop=True)
+
+
+def cargar_bitacora():
+    r = cargar("bitacora", BITACORA_FECHA, BITACORA_FECHA)
+    base = r[0][2].get("bitacora") if r else None
+    return _normalizar_bitacora(base)
+
+
+def guardar_bitacora(df):
+    df = _normalizar_bitacora(df).sort_values(["Fecha", "Guía"], kind="stable").reset_index(drop=True)
+    guardar_resultado("bitacora", BITACORA_FECHA,
+                      {"actualizado": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")},
+                      {"bitacora": df})
+
+
+def filas_bitacora_desde_btk(b, fecha, pares):
+    """pares = [(orden, observación)]. Busca cada orden en el BTK de esa fecha y arma la fila de la bitácora.
+    Devuelve (filas, no_encontradas, ya_entregadas). La última fila de la orden en el BTK es la que manda."""
+    ultima = {}
+    for i, o in enumerate(b["ORDEN"]):
+        ultima[_norm_orden(o)] = i
+    filas, no_enc, entregadas, vistas = [], [], [], set()
+    for orden, obs in pares:
+        if not orden or orden in vistas:
+            continue
+        vistas.add(orden)
+        i = ultima.get(orden)
+        if i is None:
+            no_enc.append(orden)
+            continue
+        r = b.iloc[i]
+        if bool(r["ENTREGADO"]):
+            entregadas.append(orden)
+            continue
+        intentos = r["INTENTOS"] if "INTENTOS" in b.columns else None
+        filas.append({
+            "Fecha": fecha.isoformat(), "Identificador ruta": r["RUTA"], "Patente": r["PATENTE"], "Guía": orden,
+            "Cliente": r["CLIENTE_TXT"], "Número de intentos": None if pd.isna(intentos) else int(intentos),
+            "Estado": r["ESTADO_TXT"], "Subestado": r["SUBESTADO"], "Usuario móvil": r["USUARIO"],
+            "Nombre cliente": r["NOMBRE_CLIENTE"] if "NOMBRE_CLIENTE" in b.columns else "",
+            "Dirección cliente": r["DIRECCION"] if "DIRECCION" in b.columns else "",
+            "F Compromiso": _iso(r["F_COMP"]), "Reprogramación": "", "Reingreso": False,
+            "Estado Actual": PENDIENTE, "SubEstado actual": "", "F Entrega Final": "", "Comuna": r["COMUNA"],
+            "Comuna correcta": "", "Teléfono correcto": "", "Observación": obs, "Correo SI / NO": "",
+            "Codigo": r["CODIGO"] if "CODIGO" in b.columns else "",
+            "Ejecutivo": r["EJECUTIVO"] if "EJECUTIVO" in b.columns else "",
+        })
+    return filas, no_enc, entregadas
+
+
+def agregar_a_bitacora(bit, filas):
+    """Agrega las filas nuevas. Si la orden ya estaba para esa fecha, solo actualiza su observación.
+    Devuelve (bitácora, n_nuevas, n_ya_estaban)."""
+    bit = _normalizar_bitacora(bit)
+    existentes = set(clave_bitacora(bit)) if len(bit) else set()
+    nuevas, ya = [], 0
+    for f in filas:
+        k = f"{f['Fecha']}|{f['Guía']}"
+        if k in existentes:
+            ya += 1
+            if f["Observación"]:
+                m = clave_bitacora(bit).eq(k)
+                bit.loc[m, "Observación"] = f["Observación"]
+        else:
+            nuevas.append(f)
+            existentes.add(k)
+    if nuevas:
+        bit = pd.concat([bit, pd.DataFrame(nuevas, columns=BITACORA_COLS)], ignore_index=True)
+    return _normalizar_bitacora(bit), len(nuevas), ya
+
+
+def actualizar_bitacora(bit):
+    """Busca las órdenes pendientes en los BTK guardados de los días posteriores y deja el estado y subestado más actuales.
+    Entregado / Recogido finaliza el pedido (F Entrega Final = el día de ese BTK). Devuelve (bitácora, resumen)."""
+    bit = _normalizar_bitacora(bit)
+    res = {"archivos": 0, "actualizadas": 0, "finalizadas": 0}
+    pend = bit[~bit["Estado Actual"].map(es_finalizado) & ~bit["Reingreso"]]
+    if pend.empty:
+        return bit, res
+    desde = pend["Fecha"].min()
+    la = listar_archivos()
+    fechas = sorted(f for f in la.loc[la["Tipo"].eq("btk_yanez"), "Fecha"].astype(str) if f > desde)
+    for f in fechas:
+        pend = bit[~bit["Estado Actual"].map(es_finalizado) & ~bit["Reingreso"] & bit["Fecha"].lt(f)]
+        if pend.empty:
+            break
+        arch = archivo_guardado("btk_yanez", datetime.date.fromisoformat(f))
+        if arch is None:
+            continue
+        try:
+            b = preparar_btk(leer_archivo(*arch))
+        except Exception:  # noqa: BLE001
+            continue
+        res["archivos"] += 1
+        ultima = {}
+        for i, o in enumerate(b["ORDEN"]):
+            ultima[_norm_orden(o)] = i
+        for idx in pend.index:
+            i = ultima.get(bit.at[idx, "Guía"])
+            if i is None:
+                continue
+            r = b.iloc[i]
+            nuevo = r["ESTADO_TXT"] or "No entregado"
+            sub = r["SUBESTADO"] or nuevo
+            if bool(r["ENTREGADO"]):
+                bit.at[idx, "F Entrega Final"] = f
+                res["finalizadas"] += 1
+            if bit.at[idx, "Estado Actual"] != nuevo or bit.at[idx, "SubEstado actual"] != sub:
+                res["actualizadas"] += 1
+            bit.at[idx, "Estado Actual"] = nuevo
+            bit.at[idx, "SubEstado actual"] = sub
+    return bit, res
+
+
+def actualizar_bitacora_guardada():
+    """Actualiza y guarda la bitácora guardada. Devuelve el resumen, o None si no hay nada que revisar."""
+    bit = cargar_bitacora()
+    if bit.empty:
+        return None
+    nuevo, res = actualizar_bitacora(bit)
+    if res["actualizadas"] or res["finalizadas"]:
+        guardar_bitacora(nuevo)
+    return res
+
+
+def normalizar_telefono(valor):
+    """Teléfono correcto: un número, «No» (aún no se consigue) o «No corresponde» (el teléfono del cliente
+    funciona). Devuelve (texto, válido)."""
+    t = "" if valor is None or (not isinstance(valor, str) and pd.isna(valor)) else str(valor).strip()
+    if not t:
+        return "", True
+    clave = limpiar_texto(t)
+    if clave == "NO":
+        return "No", True
+    if clave.startswith("NO CORR"):
+        return "No corresponde", True
+    digitos = re.sub(r"[\s\-+()]", "", t)
+    if digitos.isdigit() and 8 <= len(digitos) <= 12:
+        return digitos, True
+    return t, False
+
+
+def aplicar_ediciones(bit, editado, hoy):
+    """editado: DataFrame indexado por clave «fecha|guía» con las columnas editables de la vista.
+    Devuelve (bitácora, errores). Si hay errores no se aplica nada."""
+    bit = _normalizar_bitacora(bit)
+    claves = clave_bitacora(bit)
+    errores, cambios = [], {}
+    for k, r in editado.iterrows():
+        m = claves.eq(k)
+        if not m.any():
+            continue
+        repro, reing = _iso(r["Reprogramación"]), bool(r["Reingreso"])
+        fono, ok = normalizar_telefono(r["Teléfono correcto"])
+        guia = k.split("|", 1)[1]
+        if repro and reing:
+            errores.append(f"{guia}: tiene fecha de reprogramación y también reingreso. Deja solo una de las dos "
+                           "(si se reingresa, el pedido no vuelve a salir a ruta).")
+        if reing and limpiar_texto(bit.loc[m, "Estado Actual"].iloc[0]) in ("ENTREGADO", "RECOGIDO"):
+            errores.append(f"{guia}: ya figura como {bit.loc[m, 'Estado Actual'].iloc[0]} en el BTK; no se puede reingresar.")
+        if not ok:
+            errores.append(f"{guia}: el teléfono «{fono}» no es válido. Escribe el número, «No» o «No corresponde».")
+        cambios[k] = (repro, reing, fono, r)
+    if errores:
+        return bit, errores
+    for k, (repro, reing, fono, r) in cambios.items():
+        i = claves.index[claves.eq(k)][0]
+        antes_reing = bool(bit.at[i, "Reingreso"])
+        bit.at[i, "Reprogramación"] = repro
+        bit.at[i, "Reingreso"] = reing
+        bit.at[i, "Teléfono correcto"] = fono
+        bit.at[i, "Comuna correcta"] = "" if pd.isna(r["Comuna correcta"]) else str(r["Comuna correcta"]).strip()
+        bit.at[i, "Observación"] = "" if pd.isna(r["Observación"]) else str(r["Observación"]).strip()
+        correo = "" if pd.isna(r["Correo SI / NO"]) else str(r["Correo SI / NO"]).strip().upper()
+        bit.at[i, "Correo SI / NO"] = correo if correo in ("SI", "NO") else ""
+        fin = _iso(r["F Entrega Final"])
+        if fin != bit.at[i, "F Entrega Final"]:
+            bit.at[i, "F Entrega Final"] = fin
+        if reing and not antes_reing:
+            bit.at[i, "Estado Actual"] = "Reingresado"
+            if not bit.at[i, "F Entrega Final"]:
+                bit.at[i, "F Entrega Final"] = hoy.isoformat()
+        elif antes_reing and not reing:
+            bit.at[i, "Estado Actual"] = PENDIENTE
+            bit.at[i, "F Entrega Final"] = ""
+    return _normalizar_bitacora(bit), []
+
+
+EXCEL_BITACORA_ANCHOS = {"Fecha": 11, "Identificador ruta": 14, "Patente": 9, "Guía": 13, "Cliente": 8,
+                         "Número de intentos": 11, "Estado": 13, "Subestado": 22, "Usuario móvil": 24,
+                         "Nombre cliente": 22, "Dirección cliente": 75, "F Compromiso": 15, "Reprogramación": 20,
+                         "SubEstado actual": 22, "F Entrega Final": 14, "Comuna": 14, "Comuna correcta": 15,
+                         "Teléfono correcto": 16, "Observación": 40, "Correo SI / NO": 13, "Codigo": 14,
+                         "Ejecutivo": 18}
+# Colores de los encabezados del ejemplo: negro, verde en Patente y Guía, y colores propios en las columnas de seguimiento
+EXCEL_BITACORA_ENCABEZADOS = {"Patente": "00B050", "Guía": "00B050", "F Compromiso": "0B769F",
+                              "Reprogramación": "75A67C", "SubEstado actual": "75A67C", "F Entrega Final": "AF5525"}
+
+
+def excel_bitacora(df):
+    """Excel de la bitácora con el formato del ejemplo. «REINGRESO» sale en rojo pálido con letra roja."""
+    from openpyxl import Workbook
+    from openpyxl.formatting.rule import Rule
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.styles.differential import DifferentialStyle
+    from openpyxl.utils import get_column_letter
+
+    df = _normalizar_bitacora(df)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Bitácora"
+    ws.append(BITACORA_EXCEL)
+    for j, c in enumerate(BITACORA_EXCEL, 1):
+        celda = ws.cell(1, j)
+        celda.fill = PatternFill("solid", fgColor=EXCEL_BITACORA_ENCABEZADOS.get(c, "000000"))
+        celda.font = Font(bold=True, color="000000" if c in ("Reprogramación", "SubEstado actual") else "FFFFFF")
+        celda.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.column_dimensions[get_column_letter(j)].width = EXCEL_BITACORA_ANCHOS.get(c, 14)
+    banda = PatternFill("solid", fgColor="DDEBF7")
+    rojo_palido = PatternFill("solid", fgColor="FFC7CE")
+    for n, (_, r) in enumerate(df.iterrows(), 2):
+        for j, c in enumerate(BITACORA_EXCEL, 1):
+            v = r[c]
+            if c in BITACORA_FECHAS:
+                v = _a_fecha(v)
+            elif c == "Número de intentos":
+                v = None if pd.isna(v) else int(v)
+            elif c in ("Guía", "Identificador ruta") and isinstance(v, str) and v.isdigit() and len(v) <= 15:
+                v = int(v)
+            elif c in ("Teléfono correcto", "Observación", "Comuna correcta") and v == "":
+                v = None
+            if c == "Reprogramación" and r["Reingreso"]:
+                v = "REINGRESO"
+            elif c == "F Entrega Final" and v is None:
+                v = "Pendiente"
+            elif isinstance(v, str) and v == "":
+                v = None
+            celda = ws.cell(n, j, v)
+            if n % 2 == 0:
+                celda.fill = banda
+            if c in BITACORA_FECHAS:
+                celda.number_format = "dd/mm/yyyy"
+                celda.alignment = Alignment(horizontal="center")
+            if c == "Reprogramación" and r["Reingreso"]:
+                celda.fill = rojo_palido
+                celda.font = Font(bold=True, color="9C0006")
+                celda.alignment = Alignment(horizontal="center")
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(BITACORA_EXCEL))}{max(len(df) + 1, 2)}"
+    if len(df):
+        # Como en el ejemplo: una guía repetida (ej. no entregada dos días distintos) se marca en rojo
+        col_guia = get_column_letter(BITACORA_EXCEL.index("Guía") + 1)
+        ws.conditional_formatting.add(
+            f"{col_guia}2:{col_guia}{len(df) + 1}",
+            Rule(type="duplicateValues", dxf=DifferentialStyle(font=Font(color="9C0006"),
+                                                               fill=PatternFill(bgColor="FFC7CE"))))
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 # ===================== INTERFAZ =====================
 # =====================================================================
 # ACCESO CON CONTRASEÑA
@@ -2640,6 +2984,14 @@ if not st.session_state.get("limpieza_revisada"):
 # =====================================================================
 # AYUDAS DE INTERFAZ
 # =====================================================================
+def editor_df(df, **kw):
+    """st.data_editor a todo el ancho (funciona con versiones nuevas y antiguas de Streamlit)."""
+    try:
+        return st.data_editor(df, width="stretch", **kw)
+    except TypeError:
+        return st.data_editor(df, use_container_width=True, **kw)
+
+
 def mostrar_df(obj):
     try:
         st.dataframe(obj, width="stretch")
@@ -2994,6 +3346,7 @@ tabs = st.tabs([
     "6. Descargas y Respaldo",
     "7. Reporte Mensual",
     "8. Carga del día",
+    "9. Bitácora de no entregados",
 ])
 
 # ---------------------------------------------------------------------
@@ -3052,6 +3405,13 @@ with tabs[0]:
                     meta["archivo_btk"] = arch[0]
                     guardar_resultado("ns", fecha_ns, meta, dfs)
                     st.success(f"¡Día {fecha_ns:%d/%m/%Y} procesado y guardado!")
+                    try:  # los pedidos de la bitácora se ponen al día con este BTK
+                        res_bit = actualizar_bitacora_guardada()
+                        if res_bit and (res_bit["actualizadas"] or res_bit["finalizadas"]):
+                            st.info(f"📋 Bitácora de no entregados actualizada: {res_bit['actualizadas']} pedido(s) "
+                                    f"con estado nuevo, {res_bit['finalizadas']} finalizado(s).")
+                    except Exception:  # noqa: BLE001
+                        pass
                 except Exception as e:  # noqa: BLE001
                     st.error(f"No se pudo procesar el archivo: {e}")
 
@@ -3726,3 +4086,183 @@ with tabs[7]:
             dg2.download_button("📄 Descargar carga en PDF", pdf_carga(regs_cg, f_ini_cg, f_fin_cg),
                                 file_name=f"Carga_{f_ini_cg.isoformat()}_a_{f_fin_cg.isoformat()}.pdf",
                                 mime="application/pdf", key="dl_carga_pdf")
+
+
+# ---------------------------------------------------------------------
+# TAB 9: BITÁCORA DE PEDIDOS NO ENTREGADOS
+# ---------------------------------------------------------------------
+with tabs[8]:
+    st.header("9. Bitácora de pedidos no entregados")
+    st.caption("Trazabilidad de los no entregados: ingresas los números de orden de un día, la app trae del BTK "
+               "de ese día los datos y los estados, y después va actualizando el estado actual con los BTK "
+               "siguientes hasta que el pedido queda entregado o reingresado.")
+
+    msg_bit = st.session_state.pop("msg_bit", None)
+    if msg_bit:
+        for nivel, texto in msg_bit:
+            getattr(st, nivel)(texto)
+
+    bit = cargar_bitacora()
+
+    # ---------- 1. Agregar ----------
+    st.subheader("➕ Agregar no entregados de un día")
+    f_bit = st.date_input("Fecha de estos no entregados (vale para todas las órdenes que ingreses)", HOY, key="f_bit")
+    up_bit = bloque_archivo("btk_yanez", "Archivo BTK YÁÑEZ de esa fecha", f_bit, "u_btk_bit", "f_bit")
+    n_add = st.session_state.get("n_bit_add", 0)
+    base_add = pd.DataFrame({"Guía (n° de orden)": pd.Series(dtype="object"),
+                             "Observación (por qué no se entregó)": pd.Series(dtype="object")})
+    ed_add = editor_df(
+        base_add, num_rows="dynamic", hide_index=True, key=f"ed_bit_add_{n_add}",
+        column_config={"Guía (n° de orden)": st.column_config.TextColumn(width="medium"),
+                       "Observación (por qué no se entregó)": st.column_config.TextColumn(width="large")})
+    st.caption("Escribe las órdenes o copia dos columnas desde Excel (orden y observación) y pégalas aquí. "
+               "La observación es opcional; la puedes completar después en el seguimiento.")
+    if st.button("Agregar a la bitácora", key="b_bit_add"):
+        pares = [(_norm_orden(g_), "" if pd.isna(o_) else str(o_).strip())
+                 for g_, o_ in zip(ed_add.iloc[:, 0], ed_add.iloc[:, 1]) if _norm_orden(g_)]
+        if not pares:
+            st.error("Ingresa al menos un número de orden.")
+        else:
+            arch_bit = resolver_archivo("btk_yanez", f_bit, up_bit)
+            if arch_bit is None:
+                st.error("Sube el archivo BTK YÁÑEZ de esa fecha (o guarda uno antes para esta fecha).")
+            else:
+                try:
+                    b_bit = preparar_btk(leer_archivo(*arch_bit))
+                    filas_b, no_enc_b, entreg_b = filas_bitacora_desde_btk(b_bit, f_bit, pares)
+                    bit, n_nuevas, n_ya = agregar_a_bitacora(bit, filas_b)
+                    msgs = []
+                    if filas_b:
+                        guardar_bitacora(bit)
+                        res_a = actualizar_bitacora_guardada()
+                        texto = f"Se agregaron {n_nuevas} pedido(s) del {f_bit:%d/%m/%Y} a la bitácora."
+                        if n_ya:
+                            texto += f" {n_ya} ya estaba(n) y solo se actualizó su observación."
+                        if res_a and res_a["actualizadas"]:
+                            texto += f" Además se actualizó el estado de {res_a['actualizadas']} con BTK posteriores."
+                        msgs.append(("success", texto))
+                    if no_enc_b:
+                        msgs.append(("warning", "No se encontraron en el BTK de esa fecha (no se agregaron): "
+                                     + ", ".join(no_enc_b)))
+                    if entreg_b:
+                        msgs.append(("warning", "Figuran como entregadas/recogidas ese día (no se agregaron): "
+                                     + ", ".join(entreg_b)))
+                    st.session_state["msg_bit"] = msgs
+                    st.session_state["n_bit_add"] = n_add + 1
+                    st.rerun()
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"No se pudo leer el archivo BTK: {e}")
+
+    # ---------- 2. Seguimiento ----------
+    st.markdown("---")
+    st.subheader("📋 Seguimiento")
+    if bit.empty:
+        st.info("Todavía no hay pedidos en la bitácora. Agrega los no entregados de un día arriba.")
+    else:
+        if st.button("🔄 Actualizar estados con los BTK posteriores", key="b_bit_upd"):
+            with st.spinner("Buscando las órdenes en los BTK guardados…"):
+                try:
+                    nuevo_b, res_u = actualizar_bitacora(bit)
+                    if res_u["actualizadas"] or res_u["finalizadas"]:
+                        guardar_bitacora(nuevo_b)
+                    st.session_state["msg_bit"] = [(
+                        "success" if res_u["actualizadas"] else "info",
+                        f"Revisé {res_u['archivos']} archivo(s) BTK posteriores: {res_u['actualizadas']} pedido(s) "
+                        f"con estado nuevo, {res_u['finalizadas']} finalizado(s).")]
+                    st.rerun()
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"No se pudo actualizar: {e}")
+
+        fmin, fmax = _a_fecha(bit["Fecha"].min()), _a_fecha(bit["Fecha"].max())
+        fc1, fc2, fc3, fc4 = st.columns([1, 1, 1, 1.4])
+        v_ini = fc1.date_input("Desde (fecha de no entrega)", fmin, key="bit_ini")
+        v_fin = fc2.date_input("Hasta", fmax, key="bit_fin")
+        v_est = fc3.selectbox("Ver", ["Todos", "Pendientes", "Finalizados (entregados / reingresados)"], key="bit_est")
+        v_cli = fc4.multiselect("Cliente", sorted(bit["Cliente"].unique()), key="bit_cli")
+
+        fin_mask = bit["Estado Actual"].map(es_finalizado)
+        m = bit["Fecha"].between(v_ini.isoformat(), v_fin.isoformat())
+        if v_est == "Pendientes":
+            m &= ~fin_mask
+        elif v_est.startswith("Finalizados"):
+            m &= fin_mask
+        if v_cli:
+            m &= bit["Cliente"].isin(v_cli)
+        vista_b = bit[m].reset_index(drop=True)
+
+        t = bit[bit["Fecha"].between(v_ini.isoformat(), v_fin.isoformat())]
+        fin_t = t["Estado Actual"].map(es_finalizado)
+        mc = st.columns(5)
+        mc[0].metric("Total en el rango", len(t))
+        mc[1].metric("Pendientes", int((~fin_t).sum()))
+        mc[2].metric("Entregados / recogidos",
+                     int(t["Estado Actual"].map(lambda x: limpiar_texto(x) in ("ENTREGADO", "RECOGIDO")).sum()))
+        mc[3].metric("Reingresados", int(t["Reingreso"].sum()))
+        mc[4].metric("Con reprogramación", int((t["Reprogramación"].ne("") & ~fin_t).sum()))
+
+        if vista_b.empty:
+            st.info("No hay pedidos con esos filtros.")
+        else:
+            cols_vista = list(BITACORA_EXCEL)
+            cols_vista.insert(cols_vista.index("Reprogramación") + 1, "Reingreso")  # la casilla va junto a la fecha
+            vista_ed = pd.DataFrame({c: vista_b[c] for c in cols_vista})
+            vista_ed.index = clave_bitacora(vista_b)
+            for c in BITACORA_FECHAS:
+                vista_ed[c] = vista_ed[c].map(_a_fecha)
+            for c in ("Comuna correcta", "Teléfono correcto", "Observación", "Correo SI / NO"):
+                vista_ed[c] = vista_ed[c].where(vista_ed[c].ne(""), None)
+            editables = ["Reprogramación", "Reingreso", "F Entrega Final", "Comuna correcta", "Teléfono correcto",
+                         "Correo SI / NO", "Observación"]
+            fmt_f = "DD/MM/YYYY"
+            cfg = {
+                "Fecha": st.column_config.DateColumn(format=fmt_f, width="small"),
+                "F Compromiso": st.column_config.DateColumn(format=fmt_f, width="small"),
+                "Reprogramación": st.column_config.DateColumn(
+                    format=fmt_f, width="small", help="Fecha en que debe volver a salir a ruta. "
+                    "Si el pedido se reingresa no lleva fecha."),
+                "Reingreso": st.column_config.CheckboxColumn(
+                    width="small", help="Marca si el pedido se reingresa (no sale de nuevo a ruta). "
+                    "No puede tener fecha de reprogramación."),
+                "F Entrega Final": st.column_config.DateColumn(format=fmt_f, width="small"),
+                "Número de intentos": st.column_config.NumberColumn(format="%d", width="small"),
+                "Correo SI / NO": st.column_config.SelectboxColumn(options=["SI", "NO"], width="small"),
+                "Teléfono correcto": st.column_config.TextColumn(
+                    width="medium", help="El número de teléfono, «No» si aún no se consigue, "
+                    "o «No corresponde» si el teléfono del cliente funciona."),
+                "Observación": st.column_config.TextColumn(width="large"),
+                "Dirección cliente": st.column_config.TextColumn(width="large"),
+            }
+            n_seg = st.session_state.get("n_bit_seg", 0)
+            firma = f"{v_ini}{v_fin}{v_est}{','.join(v_cli)}{len(vista_b)}"
+            ed_seg = editor_df(vista_ed, column_config=cfg,
+                               disabled=[c for c in cols_vista if c not in editables], hide_index=True,
+                               key=f"ed_bit_seg_{n_seg}_{hashlib.md5(firma.encode()).hexdigest()[:8]}")
+            st.caption("Reprogramación: fecha en que vuelve a salir a ruta. Reingreso: el pedido no vuelve a salir "
+                       "(las dos opciones no pueden ir juntas). Si cambias los filtros sin guardar, "
+                       "se pierden los cambios no guardados.")
+            if st.button("💾 Guardar cambios", key="b_bit_save"):
+                nuevo_b, errores_b = aplicar_ediciones(bit, ed_seg[editables], HOY)
+                if errores_b:
+                    for e_ in errores_b:
+                        st.error(e_)
+                else:
+                    guardar_bitacora(nuevo_b)
+                    st.session_state["msg_bit"] = [("success", "Cambios guardados.")]
+                    st.session_state["n_bit_seg"] = n_seg + 1
+                    st.rerun()
+
+            st.download_button("📥 Descargar bitácora en Excel (lo que se ve con los filtros)",
+                               excel_bitacora(vista_b),
+                               file_name=f"Bitacora_no_entregados_{HOY.isoformat()}.xlsx", mime=XLSX,
+                               key="dl_bit_xlsx")
+
+        with st.expander("🗑️ Quitar pedidos de la bitácora"):
+            opciones_b = dict(zip(clave_bitacora(bit), bit["Fecha"].map(lambda f_: _a_fecha(f_).strftime("%d/%m/%Y"))
+                                  + " · " + bit["Guía"] + " · " + bit["Subestado"]))
+            quitar = st.multiselect("Pedidos a quitar (por ejemplo, ingresados por error)", list(opciones_b),
+                                    format_func=lambda k_: opciones_b[k_], key="bit_quitar")
+            if st.button("Quitar de la bitácora", key="b_bit_del") and quitar:
+                guardar_bitacora(bit[~clave_bitacora(bit).isin(quitar)])
+                st.session_state["msg_bit"] = [("success", f"Se quitaron {len(quitar)} pedido(s).")]
+                st.session_state["n_bit_seg"] = st.session_state.get("n_bit_seg", 0) + 1
+                st.rerun()
