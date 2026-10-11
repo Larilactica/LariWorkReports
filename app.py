@@ -2749,6 +2749,18 @@ def aplicar_ediciones(bit, editado, hoy):
     return _normalizar_bitacora(bit), []
 
 
+def vista_bitacora(df):
+    """La bitácora tal como sale en el Excel (para mostrarla en pantalla como lista, no como planilla editable)."""
+    df = _normalizar_bitacora(df)
+    out = pd.DataFrame({c: df[c] for c in BITACORA_EXCEL})
+    for c in BITACORA_FECHAS:
+        out[c] = df[c].map(lambda v: (_a_fecha(v).strftime("%d/%m/%Y") if _a_fecha(v) else ""))
+    out["Reprogramación"] = [("REINGRESO" if r else v) for r, v in zip(df["Reingreso"], out["Reprogramación"])]
+    out["F Entrega Final"] = out["F Entrega Final"].where(out["F Entrega Final"].ne(""), "Pendiente")
+    out["Número de intentos"] = out["Número de intentos"].astype("Int64")
+    return out.reset_index(drop=True)
+
+
 EXCEL_BITACORA_ANCHOS = {"Fecha": 11, "Identificador ruta": 14, "Patente": 9, "Guía": 13, "Cliente": 8,
                          "Número de intentos": 11, "Estado": 13, "Subestado": 22, "Usuario móvil": 24,
                          "Nombre cliente": 22, "Dirección cliente": 75, "F Compromiso": 15, "Reprogramación": 20,
@@ -3057,6 +3069,38 @@ def editor_df(df, **kw):
         return st.data_editor(df, width="stretch", **kw)
     except TypeError:
         return st.data_editor(df, use_container_width=True, **kw)
+
+
+@st.cache_data(show_spinner=False)
+def _btk_desde_bytes(nombre, contenido):
+    return preparar_btk(leer_archivo(nombre, contenido))
+
+
+@st.cache_data(show_spinner=False)
+def _btk_guardado_cache(fecha_iso, firma):
+    return btk_guardado_preparado(datetime.date.fromisoformat(fecha_iso))
+
+
+def btk_para_fecha(fecha, subido):
+    """El BTK de esa fecha ya preparado: el que se acaba de subir o, si no, el guardado. None si no hay."""
+    if subido is not None:
+        return _btk_desde_bytes(subido.name, subido.getvalue())
+    nombre = nombre_archivo("btk_yanez", fecha)
+    if not nombre:
+        return None
+    la = listar_archivos()
+    sub = la.loc[la["Tipo"].eq("btk_yanez") & la["Fecha"].astype(str).eq(fecha.isoformat()), "Subido el"]
+    return _btk_guardado_cache(fecha.isoformat(), f"{nombre}|{sub.iloc[0] if len(sub) else ''}")
+
+
+def _abrir_pedido():
+    """Al elegir un pedido ya ingresado, lleva su fecha y su guía al formulario."""
+    k = st.session_state.get("bf_abrir", "")
+    if k:
+        f, g_ = k.split("|", 1)
+        st.session_state["bf_fecha"] = datetime.date.fromisoformat(f)
+        st.session_state["bf_guia"] = g_
+        st.session_state["bf_abrir"] = ""
 
 
 def mostrar_df(obj):
@@ -4172,93 +4216,250 @@ with tabs[8]:
 
     bit = cargar_bitacora()
 
-    # ---------- 1. Agregar ----------
-    st.subheader("➕ Agregar no entregados de un día")
-    f_bit = st.date_input("Fecha de estos no entregados (vale para todas las órdenes que ingreses)", HOY, key="f_bit")
-    up_bit = bloque_archivo("btk_yanez", "Archivo BTK YÁÑEZ de esa fecha", f_bit, "u_btk_bit", "f_bit")
-    n_add = st.session_state.get("n_bit_add", 0)
-    base_add = pd.DataFrame({"Guía (n° de orden)": pd.Series(dtype="object"),
-                             "Observación (por qué no se entregó)": pd.Series(dtype="object")})
-    ed_add = editor_df(
-        base_add, num_rows="dynamic", hide_index=True, key=f"ed_bit_add_{n_add}",
-        column_config={"Guía (n° de orden)": st.column_config.TextColumn(width="medium"),
-                       "Observación (por qué no se entregó)": st.column_config.TextColumn(width="large")})
-    st.caption("Escribe las órdenes o copia dos columnas desde Excel (orden y observación) y pégalas aquí. "
-               "La observación es opcional; la puedes completar después en el seguimiento. Si todavía no tienes el "
-               "BTK de ese día, igual se guardan y los datos del BTK se completan cuando lo subas.")
-    c_add1, c_add2 = st.columns(2)
-    btn_add = c_add1.button("Agregar a la bitácora", key="b_bit_add")
-    btn_comp = c_add2.button("📎 Completar con el BTK de esta fecha", key="b_bit_comp",
-                             help="Para los pedidos que ingresaste antes de tener el BTK de ese día.")
-    if btn_add:
-        pares = [(_norm_orden(g_), "" if pd.isna(o_) else str(o_).strip())
-                 for g_, o_ in zip(ed_add.iloc[:, 0], ed_add.iloc[:, 1]) if _norm_orden(g_)]
-        if not pares:
-            st.error("Ingresa al menos un número de orden.")
+    # ---------- 1. Formulario de un pedido ----------
+    st.subheader("📝 Ingresar un pedido no entregado")
+    f_bit = st.date_input("Fecha de los no entregados (vale para todo lo que ingreses ahora)", HOY, key="bf_fecha")
+    up_bit = bloque_archivo("btk_yanez", "Archivo BTK YÁÑEZ de esa fecha (si aún no está guardado)", f_bit,
+                            "u_btk_bit", "bf_fecha")
+
+    if st.session_state.pop("bf_limpiar", False):  # después de guardar, el campo queda listo para la siguiente orden
+        st.session_state["bf_guia"] = ""
+
+    cg1, cg2 = st.columns([1, 1])
+    guia_in = cg1.text_input("Código pedido (N° de orden / guía)", key="bf_guia", placeholder="Ej. 2919501352")
+    if len(bit):
+        opciones_abrir = dict(zip(clave_bitacora(bit), bit["Fecha"].map(lambda f_: _a_fecha(f_).strftime("%d/%m"))
+                                  + " · " + bit["Guía"] + " · " + bit["Cliente"] + " · " + bit["Subestado"]))
+        cg2.selectbox("…o abrir un pedido ya ingresado para editarlo", [""] + list(opciones_abrir),
+                      format_func=lambda k_: "Elegir…" if not k_ else opciones_abrir[k_], key="bf_abrir",
+                      on_change=_abrir_pedido)
+    guia = _norm_orden(guia_in)
+
+    if not guia:
+        st.info("Escribe el número de orden y presiona Enter. La app trae los datos del BTK de esa fecha.")
+    else:
+        k_ped = f"{f_bit.isoformat()}|{guia}"
+        tok = hashlib.md5(k_ped.encode()).hexdigest()[:8]  # cada pedido tiene sus propias casillas
+        existente = bit[clave_bitacora(bit).eq(k_ped)] if len(bit) else bit
+        fila_ex = existente.iloc[0].to_dict() if len(existente) else None
+        b_dia = None
+        try:
+            b_dia = btk_para_fecha(f_bit, up_bit)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"No se pudo leer el archivo BTK: {e}")
+        campos_btk, entregado_btk, no_en_btk = None, False, False
+        if b_dia is not None:
+            i_btk = _indice_ordenes(b_dia).get(guia)
+            if i_btk is None:
+                no_en_btk = True
+            else:
+                campos_btk = _campos_btk(b_dia, b_dia.iloc[i_btk])
+                entregado_btk = bool(b_dia.iloc[i_btk]["ENTREGADO"])
+
+        if fila_ex is not None:
+            st.success(f"✏️ Pedido ya ingresado el {f_bit:%d/%m/%Y}: estás editando su información.")
+        elif b_dia is None:
+            st.warning("⏳ Todavía no hay BTK de esa fecha. Puedes guardar igual con tu información; los datos del "
+                       "BTK se completan solos cuando lo subas.")
+        elif no_en_btk:
+            st.error("Esa orden no está en el BTK de esa fecha. Revisa el número o la fecha.")
+        elif entregado_btk:
+            st.error("Esa orden figura como entregada/recogida ese día en el BTK, no corresponde a la bitácora.")
         else:
-            arch_bit = resolver_archivo("btk_yanez", f_bit, up_bit)
+            st.info("🆕 Pedido nuevo: los datos salen del BTK de esa fecha.")
+
+        # Datos que vienen del BTK (casillas grises, solo lectura): de la bitácora si ya tiene datos, si no del BTK
+        if fila_ex is not None and fila_ex["Datos BTK"]:
+            d_ro = fila_ex
+        else:
+            d_ro = dict(campos_btk or {})
+            if fila_ex is not None:
+                d_ro.update({k_: v_ for k_, v_ in fila_ex.items() if k_ in ("SubEstado actual", "F Entrega Final")})
+        d_ro = {**d_ro, "Fecha": f_bit.strftime("%d/%m/%Y"), "Guía": guia}
+
+        def _ro(col, etiqueta, campo, ancho=None):
+            v = d_ro.get(campo, "")
+            if campo in ("F Compromiso", "F Entrega Final") and v:
+                f_ = _a_fecha(v)
+                v = f_.strftime("%d/%m/%Y") if f_ else v
+            if campo == "Número de intentos" and v is not None and not pd.isna(v) and v != "":
+                v = str(int(v))
+            v = "" if v is None or (not isinstance(v, str) and pd.isna(v)) else str(v)
+            col.text_input(etiqueta, value=v, disabled=True,
+                           key=f"ro_{campo}_{tok}_{hashlib.md5(v.encode()).hexdigest()[:6]}")
+
+        r1 = st.columns(3)
+        _ro(r1[0], "Fecha", "Fecha")
+        _ro(r1[1], "Patente (PPU)", "Patente")
+        _ro(r1[2], "Guía", "Guía")
+        r2 = st.columns(3)
+        _ro(r2[0], "Cliente", "Cliente")
+        _ro(r2[1], "Identificador ruta", "Identificador ruta")
+        _ro(r2[2], "Comuna", "Comuna")
+        r3 = st.columns(3)
+        _ro(r3[0], "Estado", "Estado")
+        _ro(r3[1], "Subestado", "Subestado")
+        _ro(r3[2], "Driver (usuario móvil)", "Usuario móvil")
+        r4 = st.columns(3)
+        _ro(r4[0], "Nombre cliente", "Nombre cliente")
+        _ro(r4[1], "Fecha compromiso", "F Compromiso")
+        _ro(r4[2], "Número de intentos", "Número de intentos")
+        r5 = st.columns([2, 1, 1])
+        _ro(r5[0], "Dirección cliente", "Dirección cliente")
+        _ro(r5[1], "Código", "Codigo")
+        _ro(r5[2], "Ejecutivo", "Ejecutivo")
+        if fila_ex is not None:
+            r6 = st.columns(3)
+            _ro(r6[0], "Subestado actual", "SubEstado actual")
+            _ro(r6[1], "Fecha entrega final", "F Entrega Final")
+            r6[2].text_input("Estado actual", value=fila_ex["Estado Actual"], disabled=True,
+                             key=f"ro_estado_act_{tok}_{hashlib.md5(fila_ex['Estado Actual'].encode()).hexdigest()[:6]}")
+
+        st.markdown("**Tu información**")
+        base_f = fila_ex or {}
+        if base_f.get("Reingreso"):
+            idx_dest = 2
+        elif base_f.get("Reprogramación"):
+            idx_dest = 1
+        else:
+            idx_dest = 0
+        cf1, cf2 = st.columns(2)
+        with cf1:
+            destino = st.radio("¿Qué pasará con el pedido?",
+                               ["Sin definir", "Reprogramar (vuelve a salir a ruta)",
+                                "Reingreso (no vuelve a salir a ruta)"], index=idx_dest, key=f"bf_dest_{tok}")
+            f_repro = None
+            if destino.startswith("Reprogramar"):
+                f_ini_rep = _a_fecha(base_f.get("Reprogramación", "")) or (HOY + datetime.timedelta(days=1))
+                f_repro = st.date_input("Fecha reprogramada", f_ini_rep, key=f"bf_repro_{tok}")
+            comuna_ok = st.text_input("Comuna correcta (déjala en blanco si no corresponde)",
+                                      value=base_f.get("Comuna correcta", ""), key=f"bf_comuna_{tok}")
+            fono_ok = st.text_input("Teléfono correcto (número, «No» o «No corresponde»)",
+                                    value=base_f.get("Teléfono correcto", ""), key=f"bf_fono_{tok}",
+                                    help="Un número de teléfono; «No» si aún no se consigue; «No corresponde» si el "
+                                         "teléfono del cliente funciona. En blanco si no lo vas a usar.")
+            correo_ops = ["", "SI", "NO"]
+            correo_ok = st.selectbox("Correo", correo_ops,
+                                     index=correo_ops.index(base_f.get("Correo SI / NO", "")) if base_f.get(
+                                         "Correo SI / NO", "") in correo_ops else 0, key=f"bf_correo_{tok}",
+                                     format_func=lambda v_: v_ or "—")
+        with cf2:
+            obs_ok = st.text_area("Observación (por qué no se entregó)", value=base_f.get("Observación", ""),
+                                  height=250, key=f"bf_obs_{tok}")
+
+        bloqueado = fila_ex is None and (no_en_btk or entregado_btk)
+        if st.button("💾 Guardar pedido", key="b_bit_form_save", disabled=bloqueado):
             try:
-                msgs = []
-                if arch_bit is None:
-                    # Todavía no hay BTK de esa fecha: se guarda lo manual y los datos se completan después
-                    filas_b = filas_bitacora_manuales(f_bit, pares)
-                    bit, n_nuevas, n_ya = agregar_a_bitacora(bit, filas_b)
-                    guardar_bitacora(bit)
-                    texto = (f"Se guardaron {n_nuevas} pedido(s) del {f_bit:%d/%m/%Y} con su observación, sin datos "
-                             "del BTK todavía. Cuando tengas el BTK de esa fecha, súbelo y se completan solos "
-                             "(o usa «Completar con el BTK de esta fecha»).")
-                    if n_ya:
-                        texto += f" {n_ya} ya estaba(n) y solo se actualizó su observación."
-                    msgs.append(("success", texto))
+                if up_bit is not None:
+                    resolver_archivo("btk_yanez", f_bit, up_bit)  # guarda el BTK subido con su fecha
+                bit_n = bit
+                if fila_ex is None:
+                    bit_n, _, _ = agregar_a_bitacora(
+                        bit, [_fila_bitacora(f_bit, guia, obs_ok.strip(), campos_btk)])
+                reing = destino.startswith("Reingreso")
+                ed_f = pd.DataFrame([{
+                    "Reprogramación": f_repro.isoformat() if f_repro else "", "Reingreso": reing,
+                    "F Entrega Final": (fila_ex or {}).get("F Entrega Final", ""),
+                    "Comuna correcta": comuna_ok, "Teléfono correcto": fono_ok, "Correo SI / NO": correo_ok,
+                    "Observación": obs_ok}], index=[k_ped])
+                bit_n, errores_f = aplicar_ediciones(bit_n, ed_f, HOY)
+                if errores_f:
+                    for e_ in errores_f:
+                        st.error(e_)
                 else:
-                    b_bit = preparar_btk(leer_archivo(*arch_bit))
-                    filas_b, no_enc_b, entreg_b = filas_bitacora_desde_btk(b_bit, f_bit, pares)
-                    bit, n_nuevas, n_ya = agregar_a_bitacora(bit, filas_b)
-                    if filas_b:
+                    guardar_bitacora(bit_n)
+                    actualizar_bitacora_guardada()
+                    st.session_state["msg_bit"] = [("success", f"Pedido {guia} del {f_bit:%d/%m/%Y} guardado.")]
+                    st.session_state["bf_limpiar"] = True
+                    st.rerun()
+            except Exception as e:  # noqa: BLE001
+                st.error(f"No se pudo guardar: {e}")
+
+    with st.expander("⚡ Carga rápida de varias órdenes a la vez (tipo planilla)"):
+        st.caption("Para cuando tienes muchas órdenes: usa la fecha y el BTK de arriba.")
+        n_add = st.session_state.get("n_bit_add", 0)
+        base_add = pd.DataFrame({"Guía (n° de orden)": pd.Series(dtype="object"),
+                                 "Observación (por qué no se entregó)": pd.Series(dtype="object")})
+        ed_add = editor_df(
+            base_add, num_rows="dynamic", hide_index=True, key=f"ed_bit_add_{n_add}",
+            column_config={"Guía (n° de orden)": st.column_config.TextColumn(width="medium"),
+                           "Observación (por qué no se entregó)": st.column_config.TextColumn(width="large")})
+        st.caption("Escribe las órdenes o copia dos columnas desde Excel (orden y observación) y pégalas aquí. "
+                   "La observación es opcional; la puedes completar después en el seguimiento. Si todavía no tienes el "
+                   "BTK de ese día, igual se guardan y los datos del BTK se completan cuando lo subas.")
+        c_add1, c_add2 = st.columns(2)
+        btn_add = c_add1.button("Agregar a la bitácora", key="b_bit_add")
+        btn_comp = c_add2.button("📎 Completar con el BTK de esta fecha", key="b_bit_comp",
+                                 help="Para los pedidos que ingresaste antes de tener el BTK de ese día.")
+        if btn_add:
+            pares = [(_norm_orden(g_), "" if pd.isna(o_) else str(o_).strip())
+                     for g_, o_ in zip(ed_add.iloc[:, 0], ed_add.iloc[:, 1]) if _norm_orden(g_)]
+            if not pares:
+                st.error("Ingresa al menos un número de orden.")
+            else:
+                arch_bit = resolver_archivo("btk_yanez", f_bit, up_bit)
+                try:
+                    msgs = []
+                    if arch_bit is None:
+                        # Todavía no hay BTK de esa fecha: se guarda lo manual y los datos se completan después
+                        filas_b = filas_bitacora_manuales(f_bit, pares)
+                        bit, n_nuevas, n_ya = agregar_a_bitacora(bit, filas_b)
                         guardar_bitacora(bit)
-                        res_a = actualizar_bitacora_guardada()
-                        texto = f"Se agregaron {n_nuevas} pedido(s) del {f_bit:%d/%m/%Y} a la bitácora."
+                        texto = (f"Se guardaron {n_nuevas} pedido(s) del {f_bit:%d/%m/%Y} con su observación, sin datos "
+                                 "del BTK todavía. Cuando tengas el BTK de esa fecha, súbelo y se completan solos "
+                                 "(o usa «Completar con el BTK de esta fecha»).")
                         if n_ya:
                             texto += f" {n_ya} ya estaba(n) y solo se actualizó su observación."
-                        if res_a and res_a["actualizadas"]:
-                            texto += f" Además se actualizó el estado de {res_a['actualizadas']} con BTK posteriores."
                         msgs.append(("success", texto))
-                    if no_enc_b:
-                        msgs.append(("warning", "No se encontraron en el BTK de esa fecha (no se agregaron): "
-                                     + ", ".join(no_enc_b)))
-                    if entreg_b:
-                        msgs.append(("warning", "Figuran como entregadas/recogidas ese día (no se agregaron): "
-                                     + ", ".join(entreg_b)))
-                st.session_state["msg_bit"] = msgs
-                st.session_state["n_bit_add"] = n_add + 1
-                st.rerun()
-            except Exception as e:  # noqa: BLE001
-                st.error(f"No se pudo agregar: {e}")
-    if btn_comp:
-        arch_bit = resolver_archivo("btk_yanez", f_bit, up_bit)
-        if arch_bit is None:
-            st.error("Sube el archivo BTK YÁÑEZ de esa fecha (o guarda uno antes para esta fecha).")
-        else:
-            try:
-                b_bit = preparar_btk(leer_archivo(*arch_bit))
-                bit, n_comp, no_enc_c, entreg_c = completar_bitacora(bit, b_bit, f_bit)
-                msgs = []
-                if n_comp:
-                    guardar_bitacora(bit)
-                    actualizar_bitacora_guardada()
-                    msgs.append(("success", f"Se completaron {n_comp} pedido(s) del {f_bit:%d/%m/%Y} con el BTK."))
-                elif not (no_enc_c or entreg_c):
-                    msgs.append(("info", f"No hay pedidos del {f_bit:%d/%m/%Y} esperando datos del BTK."))
-                if no_enc_c:
-                    msgs.append(("warning", "Siguen sin datos porque no están en ese BTK (revisa el número): "
-                                 + ", ".join(no_enc_c)))
-                if entreg_c:
-                    msgs.append(("warning", "Figuran como entregadas/recogidas ese día en el BTK: "
-                                 + ", ".join(entreg_c) + ". Quítalas de la bitácora si no corresponden."))
-                st.session_state["msg_bit"] = msgs
-                st.rerun()
-            except Exception as e:  # noqa: BLE001
-                st.error(f"No se pudo completar: {e}")
+                    else:
+                        b_bit = preparar_btk(leer_archivo(*arch_bit))
+                        filas_b, no_enc_b, entreg_b = filas_bitacora_desde_btk(b_bit, f_bit, pares)
+                        bit, n_nuevas, n_ya = agregar_a_bitacora(bit, filas_b)
+                        if filas_b:
+                            guardar_bitacora(bit)
+                            res_a = actualizar_bitacora_guardada()
+                            texto = f"Se agregaron {n_nuevas} pedido(s) del {f_bit:%d/%m/%Y} a la bitácora."
+                            if n_ya:
+                                texto += f" {n_ya} ya estaba(n) y solo se actualizó su observación."
+                            if res_a and res_a["actualizadas"]:
+                                texto += f" Además se actualizó el estado de {res_a['actualizadas']} con BTK posteriores."
+                            msgs.append(("success", texto))
+                        if no_enc_b:
+                            msgs.append(("warning", "No se encontraron en el BTK de esa fecha (no se agregaron): "
+                                         + ", ".join(no_enc_b)))
+                        if entreg_b:
+                            msgs.append(("warning", "Figuran como entregadas/recogidas ese día (no se agregaron): "
+                                         + ", ".join(entreg_b)))
+                    st.session_state["msg_bit"] = msgs
+                    st.session_state["n_bit_add"] = n_add + 1
+                    st.rerun()
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"No se pudo agregar: {e}")
+        if btn_comp:
+            arch_bit = resolver_archivo("btk_yanez", f_bit, up_bit)
+            if arch_bit is None:
+                st.error("Sube el archivo BTK YÁÑEZ de esa fecha (o guarda uno antes para esta fecha).")
+            else:
+                try:
+                    b_bit = preparar_btk(leer_archivo(*arch_bit))
+                    bit, n_comp, no_enc_c, entreg_c = completar_bitacora(bit, b_bit, f_bit)
+                    msgs = []
+                    if n_comp:
+                        guardar_bitacora(bit)
+                        actualizar_bitacora_guardada()
+                        msgs.append(("success", f"Se completaron {n_comp} pedido(s) del {f_bit:%d/%m/%Y} con el BTK."))
+                    elif not (no_enc_c or entreg_c):
+                        msgs.append(("info", f"No hay pedidos del {f_bit:%d/%m/%Y} esperando datos del BTK."))
+                    if no_enc_c:
+                        msgs.append(("warning", "Siguen sin datos porque no están en ese BTK (revisa el número): "
+                                     + ", ".join(no_enc_c)))
+                    if entreg_c:
+                        msgs.append(("warning", "Figuran como entregadas/recogidas ese día en el BTK: "
+                                     + ", ".join(entreg_c) + ". Quítalas de la bitácora si no corresponden."))
+                    st.session_state["msg_bit"] = msgs
+                    st.rerun()
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"No se pudo completar: {e}")
 
     # ---------- 2. Seguimiento ----------
     st.markdown("---")
@@ -4289,8 +4490,9 @@ with tabs[8]:
 
         fmin, fmax = _a_fecha(bit["Fecha"].min()), _a_fecha(bit["Fecha"].max())
         fc1, fc2, fc3, fc4 = st.columns([1, 1, 1, 1.4])
-        v_ini = fc1.date_input("Desde (fecha de no entrega)", fmin, key="bit_ini")
-        v_fin = fc2.date_input("Hasta", fmax, key="bit_fin")
+        # la clave cambia cuando entran fechas nuevas, así el rango siempre las incluye
+        v_ini = fc1.date_input("Desde (fecha de no entrega)", fmin, key=f"bit_ini_{fmin}")
+        v_fin = fc2.date_input("Hasta", fmax, key=f"bit_fin_{fmax}")
         v_est = fc3.selectbox("Ver", ["Todos", "Pendientes", "Finalizados (entregados / reingresados)"], key="bit_est")
         v_cli = fc4.multiselect("Cliente", sorted(bit["Cliente"].unique()), key="bit_cli")
 
@@ -4317,58 +4519,62 @@ with tabs[8]:
         if vista_b.empty:
             st.info("No hay pedidos con esos filtros.")
         else:
-            cols_vista = list(BITACORA_EXCEL)
-            cols_vista.insert(cols_vista.index("Reprogramación") + 1, "Reingreso")  # la casilla va junto a la fecha
-            vista_ed = pd.DataFrame({c: vista_b[c] for c in cols_vista})
-            vista_ed.index = clave_bitacora(vista_b)
-            for c in BITACORA_FECHAS:
-                vista_ed[c] = vista_ed[c].map(_a_fecha)
-            for c in ("Comuna correcta", "Teléfono correcto", "Observación", "Correo SI / NO"):
-                vista_ed[c] = vista_ed[c].where(vista_ed[c].ne(""), None)
-            editables = ["Reprogramación", "Reingreso", "F Entrega Final", "Comuna correcta", "Teléfono correcto",
-                         "Correo SI / NO", "Observación"]
-            fmt_f = "DD/MM/YYYY"
-            cfg = {
-                "Fecha": st.column_config.DateColumn(format=fmt_f, width="small"),
-                "F Compromiso": st.column_config.DateColumn(format=fmt_f, width="small"),
-                "Reprogramación": st.column_config.DateColumn(
-                    format=fmt_f, width="small", help="Fecha en que debe volver a salir a ruta. "
-                    "Si el pedido se reingresa no lleva fecha."),
-                "Reingreso": st.column_config.CheckboxColumn(
-                    width="small", help="Marca si el pedido se reingresa (no sale de nuevo a ruta). "
-                    "No puede tener fecha de reprogramación."),
-                "F Entrega Final": st.column_config.DateColumn(format=fmt_f, width="small"),
-                "Número de intentos": st.column_config.NumberColumn(format="%d", width="small"),
-                "Correo SI / NO": st.column_config.SelectboxColumn(options=["SI", "NO"], width="small"),
-                "Teléfono correcto": st.column_config.TextColumn(
-                    width="medium", help="El número de teléfono, «No» si aún no se consigue, "
-                    "o «No corresponde» si el teléfono del cliente funciona."),
-                "Observación": st.column_config.TextColumn(width="large"),
-                "Dirección cliente": st.column_config.TextColumn(width="large"),
-            }
-            n_seg = st.session_state.get("n_bit_seg", 0)
-            firma = f"{v_ini}{v_fin}{v_est}{','.join(v_cli)}{len(vista_b)}"
-            ed_seg = editor_df(vista_ed, column_config=cfg,
-                               disabled=[c for c in cols_vista if c not in editables], hide_index=True,
-                               key=f"ed_bit_seg_{n_seg}_{hashlib.md5(firma.encode()).hexdigest()[:8]}")
-            st.caption("Reprogramación: fecha en que vuelve a salir a ruta. Reingreso: el pedido no vuelve a salir "
-                       "(las dos opciones no pueden ir juntas). Si cambias los filtros sin guardar, "
-                       "se pierden los cambios no guardados.")
-            if st.button("💾 Guardar cambios", key="b_bit_save"):
-                nuevo_b, errores_b = aplicar_ediciones(bit, ed_seg[editables], HOY)
-                if errores_b:
-                    for e_ in errores_b:
-                        st.error(e_)
-                else:
-                    guardar_bitacora(nuevo_b)
-                    st.session_state["msg_bit"] = [("success", "Cambios guardados.")]
-                    st.session_state["n_bit_seg"] = n_seg + 1
-                    st.rerun()
-
+            mostrar_df(vista_bitacora(vista_b))
             st.download_button("📥 Descargar bitácora en Excel (lo que se ve con los filtros)",
                                excel_bitacora(vista_b),
                                file_name=f"Bitacora_no_entregados_{HOY.isoformat()}.xlsx", mime=XLSX,
                                key="dl_bit_xlsx")
+            st.caption("Para editar un pedido, ábrelo arriba con «abrir un pedido ya ingresado».")
+            with st.expander("✏️ Editar varios a la vez (modo planilla)"):
+                cols_vista = list(BITACORA_EXCEL)
+                cols_vista.insert(cols_vista.index("Reprogramación") + 1, "Reingreso")  # la casilla va junto a la fecha
+                vista_ed = pd.DataFrame({c: vista_b[c] for c in cols_vista})
+                vista_ed.index = clave_bitacora(vista_b)
+                for c in BITACORA_FECHAS:
+                    vista_ed[c] = vista_ed[c].map(_a_fecha)
+                for c in ("Comuna correcta", "Teléfono correcto", "Observación", "Correo SI / NO"):
+                    vista_ed[c] = vista_ed[c].where(vista_ed[c].ne(""), None)
+                editables = ["Reprogramación", "Reingreso", "F Entrega Final", "Comuna correcta", "Teléfono correcto",
+                             "Correo SI / NO", "Observación"]
+                fmt_f = "DD/MM/YYYY"
+                cfg = {
+                    "Fecha": st.column_config.DateColumn(format=fmt_f, width="small"),
+                    "F Compromiso": st.column_config.DateColumn(format=fmt_f, width="small"),
+                    "Reprogramación": st.column_config.DateColumn(
+                        format=fmt_f, width="small", help="Fecha en que debe volver a salir a ruta. "
+                        "Si el pedido se reingresa no lleva fecha."),
+                    "Reingreso": st.column_config.CheckboxColumn(
+                        width="small", help="Marca si el pedido se reingresa (no sale de nuevo a ruta). "
+                        "No puede tener fecha de reprogramación."),
+                    "F Entrega Final": st.column_config.DateColumn(format=fmt_f, width="small"),
+                    "Número de intentos": st.column_config.NumberColumn(format="%d", width="small"),
+                    "Correo SI / NO": st.column_config.SelectboxColumn(options=["SI", "NO"], width="small"),
+                    "Teléfono correcto": st.column_config.TextColumn(
+                        width="medium", help="El número de teléfono, «No» si aún no se consigue, "
+                        "o «No corresponde» si el teléfono del cliente funciona."),
+                    "Observación": st.column_config.TextColumn(width="large"),
+                    "Dirección cliente": st.column_config.TextColumn(width="large"),
+                }
+                n_seg = st.session_state.get("n_bit_seg", 0)
+                firma = f"{v_ini}{v_fin}{v_est}{','.join(v_cli)}{len(vista_b)}"
+                ed_seg = editor_df(vista_ed, column_config=cfg,
+                                   disabled=[c for c in cols_vista if c not in editables], hide_index=True,
+                                   key=f"ed_bit_seg_{n_seg}_{hashlib.md5(firma.encode()).hexdigest()[:8]}")
+                st.caption("Reprogramación: fecha en que vuelve a salir a ruta. Reingreso: el pedido no vuelve a salir "
+                           "(las dos opciones no pueden ir juntas). Si cambias los filtros sin guardar, "
+                           "se pierden los cambios no guardados.")
+                if st.button("💾 Guardar cambios", key="b_bit_save"):
+                    nuevo_b, errores_b = aplicar_ediciones(bit, ed_seg[editables], HOY)
+                    if errores_b:
+                        for e_ in errores_b:
+                            st.error(e_)
+                    else:
+                        guardar_bitacora(nuevo_b)
+                        st.session_state["msg_bit"] = [("success", "Cambios guardados.")]
+                        st.session_state["n_bit_seg"] = n_seg + 1
+                        st.rerun()
+
+
 
         with st.expander("🗑️ Quitar pedidos de la bitácora"):
             opciones_b = dict(zip(clave_bitacora(bit), bit["Fecha"].map(lambda f_: _a_fecha(f_).strftime("%d/%m/%Y"))
