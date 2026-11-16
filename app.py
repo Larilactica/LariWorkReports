@@ -30,7 +30,7 @@ st.set_page_config(
 DB_PATH = os.environ.get("YANEZ_DB", "reportes_yanez.db")
 
 # Se muestra en la barra lateral para saber qué versión del código está corriendo en Streamlit Cloud.
-APP_VERSION = "v15 · bitácora de pedidos no entregados"
+APP_VERSION = "v16 · consolidado con NS ácido, gráficos y NS por patente"
 
 # Cómo se busca cada columna: primero por el nombre del encabezado (exacto), luego por palabras que
 # contenga, y solo como último recurso por su posición (0 = columna A), validando que el contenido tenga sentido.
@@ -1388,26 +1388,46 @@ def procesar_calces(y, p_raw, fecha):
 # =====================================================================
 # 5. SEMANAL / CONSOLIDADOS
 # =====================================================================
-def tabla_fc(datos, texto=False):
-    """Tabla con una columna por fecha: NS %, pedidos totales y no entregados, más el total del período."""
+def _ns_o_none(ent, tot):
+    """% de nivel de servicio; sin pedidos no hay porcentaje (queda vacío en vez de 0 %)."""
+    return round(pct(ent, tot), 2) if tot else None
+
+
+def tabla_ns_bloque(datos, bloque="fc", texto=False):
+    """Tabla con una columna por fecha (y el total del período) para el NS de fecha compromiso ("fc") o el NS
+    ácido ("acid"): el NS % general, de Easy y de París, y los pedidos totales, entregados y no entregados del
+    general, de Easy y de París."""
+    largo, corto = {"fc": ("Fecha Compromiso", "FC"), "acid": ("Ácido", "Ácido")}[bloque]
     calcs = [(f, calcular_ns(m)) for f, m, _ in datos]
-    fp = fmt_pct if texto else (lambda x: round(x, 2))
+    fp = (lambda x: "—" if x is None else fmt_pct(x)) if texto else (lambda x: x)
     fi = (lambda x: str(int(x))) if texto else int
     fechas = [f.strftime("%d/%m/%Y") for f, _ in calcs]
 
     def S(k):
         return sum(c[k] for _, c in calcs)
 
-    filas = [
-        ("NS Fecha Compromiso General (%)", lambda c: c["ns_fc_gen"], pct(S("fc_gen_ent"), S("fc_gen_tot")), fp),
-        ("NS FC Easy (%)", lambda c: c["ns_fc_easy"], pct(S("fc_easy_ent"), S("fc_easy_tot")), fp),
-        ("NS FC París (%)", lambda c: c["ns_fc_paris"], pct(S("fc_paris_ent"), S("fc_paris_tot")), fp),
-        ("Pedidos totales FC", lambda c: c["fc_gen_tot"], S("fc_gen_tot"), fi),
-        ("Entregados FC", lambda c: c["fc_gen_ent"], S("fc_gen_ent"), fi),
-        ("No entregados FC", lambda c: c["fc_gen_no"], S("fc_gen_no"), fi),
-        ("% No entregados FC", lambda c: pct(c["fc_gen_no"], c["fc_gen_tot"]),
-         pct(S("fc_gen_no"), S("fc_gen_tot")), fp),
-    ]
+    def ns(cli):
+        return (lambda c: _ns_o_none(c[f"{bloque}_{cli}_ent"], c[f"{bloque}_{cli}_tot"]),
+                _ns_o_none(S(f"{bloque}_{cli}_ent"), S(f"{bloque}_{cli}_tot")))
+
+    def n(cli, tipo):
+        k = f"{bloque}_{cli}_{tipo}"
+        return (lambda c: c[k]), S(k)
+
+    filas = [(f"NS {largo} General (%)", *ns("gen"), fp),
+             (f"NS {corto} Easy (%)", *ns("easy"), fp),
+             (f"NS {corto} París (%)", *ns("paris"), fp),
+             (f"Pedidos totales {corto}", *n("gen", "tot"), fi),
+             (f"Entregados {corto}", *n("gen", "ent"), fi),
+             (f"No entregados {corto}", *n("gen", "no"), fi),
+             (f"% No entregados {corto}", lambda c: _ns_o_none(c[f"{bloque}_gen_no"], c[f"{bloque}_gen_tot"]),
+              _ns_o_none(S(f"{bloque}_gen_no"), S(f"{bloque}_gen_tot")), fp),
+             (f"Pedidos Easy {corto}", *n("easy", "tot"), fi),
+             (f"Entregados Easy {corto}", *n("easy", "ent"), fi),
+             (f"No entregados Easy {corto}", *n("easy", "no"), fi),
+             (f"Pedidos París {corto}", *n("paris", "tot"), fi),
+             (f"Entregados París {corto}", *n("paris", "ent"), fi),
+             (f"No entregados París {corto}", *n("paris", "no"), fi)]
     out = []
     for etiqueta, f_dia, total, fmt in filas:
         fila = {"Indicador": etiqueta}
@@ -1416,6 +1436,85 @@ def tabla_fc(datos, texto=False):
         fila["TOTAL PERÍODO"] = fmt(total)
         out.append(fila)
     return pd.DataFrame(out)
+
+
+def tabla_fc(datos, texto=False):
+    """NS de fecha compromiso por fecha (ver tabla_ns_bloque)."""
+    return tabla_ns_bloque(datos, "fc", texto)
+
+
+def dias_grafico(datos, bloque="fc"):
+    """Una fila por día con el NS general, de Easy y de París (los días sin pedidos de un cliente quedan vacíos)."""
+    gen = "NS Compromiso (%)" if bloque == "fc" else "NS Ácido (%)"
+    filas = []
+    for f, m, _ in datos:
+        c = calcular_ns(m)
+        filas.append({"Fecha": f.strftime("%d/%m/%Y"),
+                      "NS Easy (%)": _ns_o_nan(c[f"{bloque}_easy_ent"], c[f"{bloque}_easy_tot"]),
+                      "NS París (%)": _ns_o_nan(c[f"{bloque}_paris_ent"], c[f"{bloque}_paris_tot"]),
+                      gen: _ns_o_nan(c[f"{bloque}_gen_ent"], c[f"{bloque}_gen_tot"])})
+    return pd.DataFrame(filas, columns=["Fecha", "NS Easy (%)", "NS París (%)", gen])
+
+
+GRAFICOS_SEMANAL_EXCEL = {
+    "NS Compromiso por fecha": {"por_filas": True, "titulo": "NS Compromiso por día",
+                                "series": ["NS FC Easy (%)", "NS FC París (%)", "NS Fecha Compromiso General (%)"],
+                                "etiquetas": ["NS Easy (%)", "NS París (%)", "NS Compromiso (%)"],
+                                "colores": ["1F5FBF", "7FC4FF", "FF2B2B"]},
+    "NS Ácido por fecha": {"por_filas": True, "titulo": "NS Ácido por día",
+                           "series": ["NS Ácido Easy (%)", "NS Ácido París (%)", "NS Ácido General (%)"],
+                           "etiquetas": ["NS Easy (%)", "NS París (%)", "NS Ácido (%)"],
+                           "colores": ["1F5FBF", "7FC4FF", "FF2B2B"]},
+}
+
+
+def tabla_patentes_dias(datos, texto=False, corto=False):
+    """Nivel de servicio (ácido) de cada patente por día y total del período: pedidos entregados o recogidos /
+    pedidos de Easy y París que llevó esa patente ese día. Se arma con el detalle guardado en el NS diario.
+    Devuelve (tabla, días_sin_detalle). texto=True deja los % como texto; corto=True usa fechas dd/mm y un decimal
+    (para el PDF)."""
+    por_dia, sin_detalle = {}, []
+    for f, _, dfs in datos:
+        d = dfs.get("detalle")
+        if d is None or d.empty or not {"Patente", "Estado"} <= set(d.columns):
+            sin_detalle.append(f)
+            continue
+        x = d.copy()
+        x["Patente"] = x["Patente"].fillna("").astype(str).str.strip()
+        x = x[x["Patente"].ne("")]
+        if x.empty:
+            continue
+        x["_k"] = x["Patente"].map(clave_patente)
+        x["_e"] = x["Estado"].fillna("").astype(str).map(limpiar_texto).isin(ESTADOS_GESTIONADOS)
+        por_dia[f] = x.groupby("_k").agg(pat=("Patente", "first"), tot=("_e", "size"), ent=("_e", "sum"))
+    if not por_dia:
+        return pd.DataFrame(), sin_detalle
+    fechas = sorted(por_dia)
+    nombres = {}
+    for f in fechas:
+        for k, pat in por_dia[f]["pat"].items():
+            nombres.setdefault(k, pat)
+    fmt_f = (lambda f: f.strftime("%d/%m")) if corto else (lambda f: f.strftime("%d/%m/%Y"))
+    fp = (lambda x: "" if x is None else (f"{x:.1f}".replace(".", ",") + "%" if corto else fmt_pct(x))) if texto \
+        else (lambda x: x)
+    cols_fecha = [fmt_f(f) for f in fechas]
+    filas = []
+    for k in sorted(nombres, key=lambda k: nombres[k]):
+        fila, tot, ent, dias = {"Patente": nombres[k]}, 0, 0, 0
+        for f, ftxt in zip(fechas, cols_fecha):
+            g = por_dia[f]
+            if k in g.index:
+                t_, e_ = int(g.at[k, "tot"]), int(g.at[k, "ent"])
+                fila[ftxt] = fp(_ns_o_none(e_, t_))
+                tot, ent, dias = tot + t_, ent + e_, dias + 1
+            else:
+                fila[ftxt] = fp(None)
+        fila["TOTAL A LA FECHA (%)"] = fp(_ns_o_none(ent, tot))
+        fila.update({"Pedidos totales": tot, "Entregados": ent, "No entregados": tot - ent, "Días en ruta": dias})
+        filas.append(fila)
+    out = pd.DataFrame(filas)
+    out.attrs["pct_cols"] = cols_fecha
+    return out, sin_detalle
 
 
 def df_ns_dias(datos):
@@ -1491,7 +1590,9 @@ def _con_porcentajes(df):
     """Excel guarda los porcentajes como fracción (0,9231) con formato de %, para que se puedan formatear y operar.
     Devuelve (df, columnas_en_porcentaje, posiciones_de_filas_en_porcentaje)."""
     d = df.copy()
-    cols = [c for c in d.columns if _es_pct(c) and pd.api.types.is_numeric_dtype(d[c])]
+    # df.attrs["pct_cols"]: columnas que son porcentajes aunque su nombre no lo diga (p. ej. una columna por fecha)
+    extra = set(df.attrs.get("pct_cols", ()))
+    cols = [c for c in d.columns if (_es_pct(c) or c in extra) and pd.api.types.is_numeric_dtype(d[c])]
     for c in cols:
         d[c] = (d[c] / 100).round(6)
     filas = []
@@ -1531,6 +1632,9 @@ def a_excel(hojas, graficos=None):
             d.to_excel(writer, sheet_name=n, index=False)
             ws = writer.sheets[n]
             ws.freeze_panes = "A2"
+            ws.page_setup.orientation = "landscape"  # al imprimir, todas las columnas caben en el ancho de la hoja
+            ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+            ws.sheet_properties.pageSetUpPr.fitToPage = True
             if ws.max_row > 1 and ws.max_column >= 1:
                 ws.auto_filter.ref = ws.dimensions
             for celda in ws[1]:
@@ -1552,8 +1656,47 @@ def a_excel(hojas, graficos=None):
                 largo = max((len(str(c.value)) for c in col if c.value is not None), default=0)
                 ws.column_dimensions[col[0].column_letter].width = min(largo + 2, 45)
             if graficos and nombre in graficos and ws.max_row > 1:
-                _grafico_lineas_excel(ws, d, graficos[nombre])
+                if graficos[nombre].get("por_filas"):
+                    _grafico_filas_excel(ws, graficos[nombre])
+                else:
+                    _grafico_lineas_excel(ws, d, graficos[nombre])
     return buf.getvalue()
+
+
+def _grafico_filas_excel(ws, g):
+    """Gráfico de líneas para una tabla con una columna por fecha (la primera columna son los indicadores y la
+    última el total del período). Se dibuja debajo de la tabla; la tabla manda: si cambias un dato, el gráfico cambia.
+    g = {"titulo", "series": [texto de la columna A de cada fila], "etiquetas": [nombre en la leyenda], "colores"}"""
+    from openpyxl.chart import LineChart, Reference, Series
+
+    filas = {str(ws.cell(r, 1).value): r for r in range(2, ws.max_row + 1)}
+    ult = ws.max_column - 1  # la última columna es el total del período, no una fecha
+    if ult < 2:
+        return
+    ch = LineChart()
+    ch.title = g.get("titulo", "")
+    ch.height, ch.width = 9.5, 26
+    ch.x_axis.delete = False
+    ch.y_axis.delete = False
+    ch.y_axis.number_format = "0%"
+    vals = []
+    for fila_txt, leyenda, color in zip(g["series"], g["etiquetas"], g["colores"]):
+        r = filas.get(fila_txt)
+        if r is None:
+            continue
+        serie = Series(Reference(ws, min_col=2, max_col=ult, min_row=r, max_row=r), title=leyenda)
+        serie.smooth = False
+        serie.graphicalProperties.line.solidFill = color
+        serie.graphicalProperties.line.width = 19000
+        ch.series.append(serie)
+        vals += [v for v in (ws.cell(r, c).value for c in range(2, ult + 1)) if isinstance(v, (int, float))]
+    if not ch.series:
+        return
+    ch.set_categories(Reference(ws, min_col=2, max_col=ult, min_row=1, max_row=1))
+    if vals:
+        ch.y_axis.scaling.min = max(0.0, (int(min(vals) * 100 - 5) // 10) / 10)
+        ch.y_axis.scaling.max = 1.0
+    ws.add_chart(ch, f"A{ws.max_row + 3}")
 
 
 def _grafico_lineas_excel(ws, d, g):
@@ -2283,6 +2426,38 @@ def hojas_compromiso(regs, anio, mes):
     return hojas
 
 
+def secciones_pdf_semanal(datos, resumen, dias, rank):
+    """Secciones del PDF del consolidado semanal / rango: NS compromiso y NS ácido (tabla y gráfico), NS por patente,
+    resumen del rango, NS por día y sub-estados de no entrega."""
+    colores = ["#1F5FBF", "#7FC4FF", "#FF2B2B"]
+    secs = [
+        {"titulo": "NS Fecha Compromiso por día", "df": tabla_ns_bloque(datos, "fc", texto=True)},
+        {"titulo": "NS Compromiso por día (gráfico)",
+         "grafico": {"df": dias_grafico(datos, "fc"), "x": "Fecha",
+                     "series": ["NS Easy (%)", "NS París (%)", "NS Compromiso (%)"],
+                     "etiquetas": ["NS Easy (%)", "NS París (%)", "NS Compromiso (%)"], "colores": colores}},
+        {"titulo": "NS Ácido por día", "df": tabla_ns_bloque(datos, "acid", texto=True),
+         "nota": "NS ácido = pedidos entregados o recogidos / pedidos totales de Easy y París de cada día."},
+        {"titulo": "NS Ácido por día (gráfico)",
+         "grafico": {"df": dias_grafico(datos, "acid"), "x": "Fecha",
+                     "series": ["NS Easy (%)", "NS París (%)", "NS Ácido (%)"],
+                     "etiquetas": ["NS Easy (%)", "NS París (%)", "NS Ácido (%)"], "colores": colores}},
+    ]
+    pat, _ = tabla_patentes_dias(datos, texto=True, corto=True)
+    if not pat.empty:
+        nota = "% de pedidos entregados o recogidos de cada patente. Vacío = esa patente no salió ese día."
+        if len(datos) > 12:  # con tantas fechas las columnas no caben en la hoja: el detalle diario queda en el Excel
+            pat = pat[["Patente", "TOTAL A LA FECHA (%)", "Pedidos totales", "Entregados", "No entregados",
+                       "Días en ruta"]]
+            nota = "El % de cada patente día por día está en el Excel del rango."
+        secs.append({"titulo": "Nivel de servicio por patente (diario y total a la fecha)", "df": pat, "nota": nota})
+    secs += [{"titulo": "Resumen del rango", "df": resumen},
+             {"titulo": "NS por día", "df": dias},
+             {"titulo": "Submotivos de no entrega", "df": rank if not rank.empty else None,
+              "nota": "" if not rank.empty else "No se registraron no entregas en el rango."}]
+    return secs
+
+
 # =====================================================================
 # 8. CARGA DEL DÍA (bultos retirados en cada centro de distribución, ingreso manual)
 # =====================================================================
@@ -2757,7 +2932,7 @@ def vista_bitacora(df):
         out[c] = df[c].map(lambda v: (_a_fecha(v).strftime("%d/%m/%Y") if _a_fecha(v) else ""))
     out["Reprogramación"] = [("REINGRESO" if r else v) for r, v in zip(df["Reingreso"], out["Reprogramación"])]
     out["F Entrega Final"] = out["F Entrega Final"].where(out["F Entrega Final"].ne(""), "Pendiente")
-    out["Número de intentos"] = out["Número de intentos"].astype("Int64")
+    out["Número de intentos"] = out["Número de intentos"].map(lambda v: "" if pd.isna(v) else str(int(v)))
     return out.reset_index(drop=True)
 
 
@@ -3339,6 +3514,18 @@ def mostrar_ns(m, dfs):
                        key=f"dl_pdf_ns_{fecha}")
 
 
+def grafico_ns_app(dia_df, col_general, titulo):
+    """Gráfico de líneas del NS por día: Easy, París y general (mismos colores que el Excel)."""
+    st.markdown(f"**{titulo}**")
+    g = dia_df.copy()
+    g.index = pd.to_datetime(g["Fecha"], format="%d/%m/%Y")
+    g = g[["NS Easy (%)", "NS París (%)", col_general]]
+    try:
+        st.line_chart(g, color=["#0068c9", "#83c9ff", "#ff2b2b"])
+    except TypeError:  # versiones antiguas de Streamlit sin el parámetro de color
+        st.line_chart(g)
+
+
 def mostrar_semanal(f_ini, f_fin, clave="sem"):
     datos = cargar("ns", f_ini, f_fin)
     if not datos:
@@ -3357,7 +3544,32 @@ def mostrar_semanal(f_ini, f_fin, clave="sem"):
         st.info("El rango incluye días domingo con datos.")
 
     st.subheader("📅 NS Fecha Compromiso por día")
-    mostrar_df(tabla_fc(datos, texto=True))
+    mostrar_df(tabla_ns_bloque(datos, "fc", texto=True))
+
+    st.subheader("📅 NS Ácido por día")
+    st.caption("NS ácido = pedidos entregados o recogidos / pedidos totales de Easy y París de cada día "
+               "(se calcula con el BTK, tengan o no fecha compromiso ese día).")
+    mostrar_df(tabla_ns_bloque(datos, "acid", texto=True))
+
+    st.subheader("📈 Evolución diaria")
+    g1, g2 = st.columns(2)
+    with g1:
+        grafico_ns_app(dias_grafico(datos, "fc"), "NS Compromiso (%)", "NS Compromiso por día")
+    with g2:
+        grafico_ns_app(dias_grafico(datos, "acid"), "NS Ácido (%)", "NS Ácido por día")
+
+    st.subheader("🚚 Nivel de servicio por patente (diario y total a la fecha)")
+    pat_df, sin_det = tabla_patentes_dias(datos)
+    if sin_det:
+        st.info("Estos días no tienen el detalle por patente guardado (se procesaron con una versión anterior de la "
+                "app); vuelve a procesar su BTK en la pestaña 1 para que aparezcan: "
+                + ", ".join(f.strftime("%d/%m") for f in sin_det))
+    if pat_df.empty:
+        st.info("No hay detalle por patente en los días seleccionados.")
+    else:
+        st.caption("% de pedidos entregados o recogidos sobre los pedidos de Easy y París que llevó cada patente ese "
+                   "día. «Total a la fecha» suma todos los días del rango. Vacío = esa patente no salió ese día.")
+        mostrar_df(tabla_patentes_dias(datos, texto=True)[0])
 
     r = resumen_periodo(datos)
     st.subheader("🌐 Métricas Globales del Rango Seleccionado")
@@ -3379,8 +3591,6 @@ def mostrar_semanal(f_ini, f_fin, clave="sem"):
     f3.metric("Rutas Operadas París", r["rutas_paris"])
 
     dias = df_ns_dias(datos)
-    st.subheader("📈 Evolución diaria")
-    st.line_chart(dias.set_index("Fecha")[["NS FC General (%)", "NS Ácido General (%)"]])
 
     st.markdown("---")
     st.subheader("⚠️ Consolidado de Submotivos de No Entrega")
@@ -3402,19 +3612,17 @@ def mostrar_semanal(f_ini, f_fin, clave="sem"):
         {"Indicador": "Rutas operadas Easy", "Valor": r["rutas_easy"]},
         {"Indicador": "Rutas operadas París", "Valor": r["rutas_paris"]},
     ])
-    xls = a_excel({"NS FC por fecha": tabla_fc(datos), "Resumen": resumen,
-                   "Submotivos": rank, "Detalle por día": dias})
+    hojas = {"NS Compromiso por fecha": tabla_ns_bloque(datos, "fc"), "NS Ácido por fecha": tabla_ns_bloque(datos, "acid")}
+    if not pat_df.empty:
+        hojas["NS por patente"] = pat_df
+    hojas.update({"Resumen": resumen, "Submotivos": rank, "Detalle por día": dias})
+    xls = a_excel(hojas, GRAFICOS_SEMANAL_EXCEL)
     st.download_button("📥 Descargar reporte semanal en Excel", xls,
                        file_name=f"Reporte_Semanal_{f_ini.isoformat()}_a_{f_fin.isoformat()}.xlsx",
                        mime=XLSX, key=f"dl_{clave}")
     try:
-        pdf = pdf_reporte(f"NS del {f_ini:%d/%m/%Y} al {f_fin:%d/%m/%Y}", [
-            {"titulo": "NS Fecha Compromiso por día", "df": tabla_fc(datos, texto=True)},
-            {"titulo": "Resumen del rango", "df": resumen},
-            {"titulo": "NS por día", "df": dias},
-            {"titulo": "Submotivos de no entrega", "df": rank if not rank.empty else None,
-             "nota": "" if not rank.empty else "No se registraron no entregas en el rango."},
-        ])
+        pdf = pdf_reporte(f"NS del {f_ini:%d/%m/%Y} al {f_fin:%d/%m/%Y}",
+                          secciones_pdf_semanal(datos, resumen, dias, rank))
         st.download_button("📄 Descargar reporte del rango en PDF", pdf,
                            file_name=f"Reporte_NS_{f_ini.isoformat()}_a_{f_fin.isoformat()}.pdf",
                            mime="application/pdf", key=f"dlpdf_{clave}")
@@ -3455,9 +3663,8 @@ tabs = st.tabs([
     "4. Cruce de Calces París",
     "5. Consolidado Semanal/Rango",
     "6. Descargas y Respaldo",
-    "7. Reporte Mensual",
-    "8. Carga del día",
-    "9. Bitácora de no entregados",
+    "7. Carga del día",
+    "8. Bitácora de no entregados",
 ])
 
 # ---------------------------------------------------------------------
@@ -3785,353 +3992,10 @@ with tabs[5]:
 
 
 # ---------------------------------------------------------------------
-# TAB 7: REPORTE MENSUAL
+# TAB 7: CARGA DEL DÍA (bultos retirados por centro de distribución)
 # ---------------------------------------------------------------------
 with tabs[6]:
-    st.header("7. Reporte Mensual")
-    st.markdown("Sube el BTK y el Hela de todo el mes (con la **fecha de cada día en la columna A**) para obtener "
-                "comunas, NS compromiso, NS ácido y órdenes por patente del mes.")
-    st.session_state.setdefault("m_anio", HOY.year)
-    st.session_state.setdefault("m_mes", HOY.month)
-    cm1, cm2 = st.columns(2)
-    anio_m = int(cm1.number_input("Año", min_value=2020, max_value=2100, step=1, key="m_anio"))
-    mes_m = int(cm2.selectbox("Mes", list(range(1, 13)), format_func=lambda i: MESES[i - 1].capitalize(), key="m_mes"))
-    primer_m = primer_dia_mes(anio_m, mes_m)
-    ultimo_m = (primer_m + datetime.timedelta(days=32)).replace(day=1) - datetime.timedelta(days=1)
-
-    st.subheader("📂 Archivos del mes")
-    cu1, cu2, cu3 = st.columns(3)
-    up_btk_m = cu1.file_uploader("BTK Yáñez del mes (Excel/CSV)", type=["xlsx", "xls", "csv"], key="u_btk_mes",
-                                 on_change=autodetectar_mes)
-    up_hela_m = cu2.file_uploader("Hela del mes (Excel/CSV)", type=["xlsx", "xls", "csv"], key="u_hela_mes")
-    up_paris_m = cu3.file_uploader("BTK París del mes (solo para el calce)", type=["xlsx", "xls", "csv"],
-                                   key="u_paris_mes")
-    g_btk, g_hela = nombre_archivo("btk_mensual", primer_m), nombre_archivo("hela_mensual", primer_m)
-    g_par = nombre_archivo("btk_paris_mensual", primer_m)
-    if (g_btk or g_hela or g_par) and up_btk_m is None and up_hela_m is None and up_paris_m is None:
-        st.caption(f"📂 Guardado para {MESES[mes_m - 1]} de {anio_m}: BTK Yáñez «{g_btk or '—'}», "
-                   f"Hela «{g_hela or '—'}», BTK París «{g_par or '—'}».")
-
-    if st.button("Procesar mes", key="b_proc_mes"):
-        a_btk = resolver_mensual("btk_mensual", primer_m, up_btk_m)
-        a_hela = resolver_mensual("hela_mensual", primer_m, up_hela_m)
-        if a_btk is None or a_hela is None:
-            st.error("Faltan archivos: necesitas el BTK y el Hela del mes.")
-        else:
-            try:
-                with st.spinner("Procesando el mes completo…"):
-                    b_mes = preparar_btk(_leer_cache(*a_btk))
-                    meta_p, dfs_p = procesar_mensual(_leer_cache(*a_hela), b_mes, anio_m, mes_m)
-                    guardar_resultado("mensual", primer_m, meta_p, dfs_p)
-                st.success(f"¡{MESES[mes_m - 1].capitalize()} de {anio_m} procesado! {meta_p['dias']} día(s) con datos.")
-                for aviso in meta_p["avisos"]:
-                    st.warning(aviso)
-                mostrar_mapeos(meta_p)
-            except Exception as e:  # noqa: BLE001
-                st.error(f"No se pudo procesar el mes: {e}")
-
-    res_mes = cargar("mensual", primer_m, primer_m)
-    meta_m, dfs_m = (res_mes[0][1], res_mes[0][2]) if res_mes else ({}, {})
-    regs_m = cargar_fc_mes(primer_m, ultimo_m)
-    res_cal = cargar("calce_mensual", primer_m, primer_m)
-    meta_cal, dfs_cal = (res_cal[0][1], res_cal[0][2]) if res_cal else ({}, {})
-    sub = st.tabs(["Comunas del mes", "NS Compromiso", "NS Ácido", "NS por patente (mes)", "Descargar todo",
-                   "Calce París del mes"])
-    sin_datos = "Todavía no hay datos de este mes. Sube los archivos y presiona «Procesar mes»."
-
-    # ----- Comunas del mes -----
-    with sub[0]:
-        com_m = dfs_m.get("comunas", pd.DataFrame())
-        if com_m.empty:
-            st.info(sin_datos)
-        else:
-            for aviso in meta_m.get("avisos", []):
-                st.warning(aviso)
-            bon_m = df_bonificacion(com_m)
-            q1, q2, q3, q4 = st.columns(4)
-            q1.metric("Días con datos", meta_m.get("dias", 0))
-            q2.metric("Rutas-día", len(com_m))
-            q3.metric("Rutas con pago", len(bon_m))
-            q4.metric("Bonificación del mes", f"$ {int(bon_m['D: Valor'].sum()):,}".replace(",", "."))
-            mostrar_df(estilizar(com_m, ["U: Coincide puntos", "W: Coincide compromisos", "Z: Coincide con Hela"],
-                                 "NO", "SÍ"))
-            st.subheader("Bonificación del mes por patente")
-            mostrar_df(bonificacion_por_patente(bon_m))
-            pat_c = dfs_m.get("patentes", pd.DataFrame())
-            if not pat_c.empty:
-                st.subheader("NS de cada patente en el mes")
-                st.caption("Resumen del mes por patente, aparte del detalle de cada día de la tabla de arriba.")
-                mostrar_df(pat_c)
-            hojas_c = {"Comunas del mes": com_m, "Bonificación del mes": bon_m,
-                       "Bonificación por patente": bonificacion_por_patente(bon_m)}
-            if not pat_c.empty:
-                hojas_c["NS por patente del mes"] = pat_c
-            dm1, dm2 = st.columns(2)
-            dm1.download_button("📥 Descargar comunas y bonificación del mes (Excel)",
-                                a_excel(hojas_c),
-                                file_name=f"Comunas_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_com_mes")
-            dm2.download_button("📄 Descargar bonificación del mes en PDF", pdf_bonificacion(com_m, anio_m, mes_m),
-                                file_name=f"Bonificacion_{anio_m}-{mes_m:02d}.pdf", mime="application/pdf",
-                                key="dl_bon_pdf")
-
-    # ----- NS Compromiso (ingreso manual) -----
-    with sub[1]:
-        st.subheader("Datos de fecha compromiso por día (ingreso manual)")
-        st.caption("Fecha compromiso = pedidos cuya fecha de entrega límite es ese mismo día, aunque se hayan "
-                   "entregado después (incluso pedidos del mes anterior). Por eso se ingresan a mano, por cliente.")
-        dia_fc = st.date_input("Día que estás ingresando", value=min(max(HOY, primer_m), ultimo_m),
-                               min_value=primer_m, max_value=ultimo_m, key=f"m_fc_dia_{anio_m}_{mes_m}")
-        ya = {r["fecha"]: r for r in regs_m}
-        pre_e = pre_p = (0, 0, 0)
-        origen_pre = None
-        if dia_fc in ya and ya[dia_fc]["easy"] is not None:
-            pre_e, pre_p = ya[dia_fc]["easy"], ya[dia_fc]["paris"]
-            if ya[dia_fc].get("origen") == "NS diario":
-                origen_pre = "ns_diario"
-                st.caption("Este día toma los datos del NS diario (pestaña 1). Si los guardas aquí, se usará lo de aquí.")
-            else:
-                origen_pre = "guardado"
-        elif dia_fc in ya:
-            origen_pre = "general"
-            st.warning(f"Este día solo tiene un total general guardado ({ya[dia_fc]['tot']} pedidos). "
-                       "Ingrésalo ahora por cliente para reemplazarlo.")
-        else:
-            ns_dia = cargar("ns", dia_fc, dia_fc)
-            if ns_dia:
-                cc = calcular_ns(ns_dia[0][1])
-                if cc["fc_gen_tot"]:
-                    pre_e = (cc["fc_easy_tot"], cc["fc_easy_ent"], cc["fc_easy_no"])
-                    pre_p = (cc["fc_paris_tot"], cc["fc_paris_ent"], cc["fc_paris_no"])
-                    origen_pre = "ns_diario"
-                    st.caption("Valores precargados desde el NS diario de ese día; puedes cambiarlos.")
-
-        def bloque_cliente(col, nombre, clave, pre):
-            with col:
-                st.markdown(f"**{nombre}**")
-                t = st.number_input("Pedidos fecha compromiso totales", min_value=0, step=1, value=int(pre[0]),
-                                    key=f"mfc_{clave}_t_{dia_fc}_{origen_pre}")
-                e = st.number_input("Entregados", min_value=0, step=1, value=int(pre[1]),
-                                    key=f"mfc_{clave}_e_{dia_fc}_{origen_pre}")
-                n = st.number_input("No entregados", min_value=0, step=1, value=int(pre[2]),
-                                    key=f"mfc_{clave}_n_{dia_fc}_{origen_pre}")
-                ok = t == e + n
-                if not ok:
-                    st.error(f"{nombre}: los totales ({t}) no coinciden con entregados + no entregados ({e + n}).")
-                elif t:
-                    st.caption(f"NS compromiso {nombre}: {fmt_pct(pct(e, t))}")
-            return (t, e, n), ok
-
-        col_e, col_p = st.columns(2)
-        val_e, ok_e = bloque_cliente(col_e, "Easy", "e", pre_e)
-        val_p, ok_p = bloque_cliente(col_p, "París", "p", pre_p)
-        tot_g, ent_g = val_e[0] + val_p[0], val_e[1] + val_p[1]
-        if tot_g:
-            st.caption(f"NS compromiso general del día: {fmt_pct(pct(ent_g, tot_g))} ({ent_g} de {tot_g} pedidos)")
-        b1c, b2c = st.columns(2)
-        if b1c.button("💾 Guardar este día", key=f"mfc_g_{dia_fc}", disabled=not (ok_e and ok_p)):
-            guardar_fc(dia_fc, val_e, val_p)
-            st.success(f"Guardado el {dia_fc:%d/%m/%Y}.")
-            st.rerun()
-        if dia_fc in ya and ya[dia_fc].get("origen") != "NS diario" and b2c.button(
-                "🗑️ Eliminar este día", key=f"mfc_d_{dia_fc}"):
-            borrar_fc(dia_fc)
-            st.rerun()
-
-        st.markdown("---")
-        st.subheader("📈 NS Compromiso del mes")
-        dia_c, sem_c, mes_c = tablas_ns_compromiso(regs_m)
-        if mes_c is None:
-            st.info("Ingresa al menos un día para ver el reporte.")
-        else:
-            r1, r2, r3 = st.columns(3)
-            r1.metric(f"NS Compromiso general de {MESES[mes_m - 1]}", fmt_pct(mes_c["general"]))
-            r2.metric("Easy", fmt_pct(mes_c["easy"]) if mes_c["easy"] == mes_c["easy"] else "—")
-            r3.metric("París", fmt_pct(mes_c["paris"]) if mes_c["paris"] == mes_c["paris"] else "—")
-            st.markdown("**Por semana**")
-            mostrar_df(sem_c)
-            st.markdown("**Por día**")
-            mostrar_df(dia_c)
-            st.markdown("**Evolución diaria**")
-            graf_c = dia_c.set_index("Fecha")[["NS Easy (%)", "NS París (%)", "NS Compromiso (%)"]]
-            try:
-                st.line_chart(graf_c, color=["#0068c9", "#83c9ff", "#ff2b2b"])
-            except TypeError:  # versiones antiguas de Streamlit sin el parámetro de color
-                st.line_chart(graf_c)
-            st.caption("Para descargar usa los botones de abajo (Excel o PDF). El ícono pequeño de la tabla baja un "
-                       "CSV que Excel en español abre todo en una columna.")
-            dc1, dc2 = st.columns(2)
-            dc1.download_button("📥 Descargar NS Compromiso en Excel",
-                                a_excel(hojas_compromiso(regs_m, anio_m, mes_m), GRAFICO_COMPROMISO_EXCEL),
-                                file_name=f"NS_Compromiso_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_comp_xlsx")
-            dc2.download_button("📄 Descargar NS Compromiso en PDF", pdf_ns_compromiso(regs_m, anio_m, mes_m),
-                                file_name=f"NS_Compromiso_{anio_m}-{mes_m:02d}.pdf", mime="application/pdf",
-                                key="dl_comp_pdf")
-            dias_btk = set()
-            if "acido_dia" in dfs_m and not dfs_m["acido_dia"].empty:
-                dias_btk = {datetime.datetime.strptime(x, "%d/%m/%Y").date() for x in dfs_m["acido_dia"]["Fecha"]}
-            faltan_fc = sorted(dias_btk - {r["fecha"] for r in regs_m})
-            if faltan_fc:
-                st.warning("Días con pedidos en el BTK sin datos de compromiso ingresados: "
-                           + ", ".join(f"{d:%d/%m}" for d in faltan_fc))
-            with st.expander("Ver los datos ingresados"):
-                filas_v = []
-                for r in sorted(regs_m, key=lambda r: r["fecha"]):
-                    fila = {"Fecha": r["fecha"].strftime("%d/%m/%Y"), "Origen": r.get("origen", "Mensual")}
-                    for nombre, clave in (("Easy", "easy"), ("París", "paris")):
-                        t, e, n = r[clave] if r[clave] is not None else ("—", "—", "—")
-                        fila.update({f"{nombre} totales": t, f"{nombre} entregados": e, f"{nombre} no entregados": n})
-                    filas_v.append(fila)
-                mostrar_df(pd.DataFrame(filas_v))
-
-    # ----- NS Ácido -----
-    with sub[2]:
-        ac_dia = dfs_m.get("acido_dia", pd.DataFrame())
-        if ac_dia.empty:
-            st.info(sin_datos)
-        else:
-            ac_mes = dfs_m["acido_mes"].iloc[0]
-            n1, n2, n3, n4 = st.columns(4)
-            n1.metric("NS Ácido del mes", fmt_pct(ac_mes["NS Ácido (%)"]))
-            n2.metric("Órdenes totales", int(ac_mes["Órdenes totales"]))
-            n3.metric("Entregadas / recogidas", int(ac_mes["Entregadas / recogidas"]))
-            n4.metric("No entregadas", int(ac_mes["No entregadas"]))
-            st.markdown("**Por semana**")
-            mostrar_df(dfs_m["acido_semana"])
-            st.markdown("**Por día**")
-            mostrar_df(ac_dia)
-            st.line_chart(ac_dia.set_index("Fecha")[["NS Ácido (%)", "NS Easy (%)", "NS París (%)"]])
-            da1, da2 = st.columns(2)
-            da1.download_button("📥 Descargar NS Ácido en Excel",
-                                a_excel(hojas_acido(dfs_m), GRAFICO_ACIDO_EXCEL),
-                                file_name=f"NS_Acido_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_acido_mes")
-            da2.download_button("📄 Descargar NS Ácido en PDF", pdf_ns_acido(dfs_m, anio_m, mes_m),
-                                file_name=f"NS_Acido_{anio_m}-{mes_m:02d}.pdf", mime="application/pdf",
-                                key="dl_acido_pdf")
-
-    # ----- Órdenes por patente -----
-    with sub[3]:
-        pat_m = dfs_m.get("patentes", pd.DataFrame())
-        if pat_m.empty:
-            st.info(sin_datos)
-        else:
-            mostrar_df(pat_m)
-            st.caption("% entrega del mes = órdenes entregadas o recogidas / órdenes totales de la patente en el mes "
-                       "(solo Easy y París). NS Easy y NS París usan el mismo cálculo con los pedidos de cada cliente.")
-            dp1, dp2 = st.columns(2)
-            dp1.download_button("📥 Descargar NS por patente en Excel", a_excel({"NS por patente del mes": pat_m}),
-                                file_name=f"Ordenes_por_patente_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_pat_mes")
-            dp2.download_button("📄 Descargar NS por patente en PDF", pdf_patentes(dfs_m, anio_m, mes_m),
-                                file_name=f"NS_por_patente_{anio_m}-{mes_m:02d}.pdf", mime="application/pdf",
-                                key="dl_pat_pdf")
-
-    # ----- Descargar todo -----
-    with sub[4]:
-        st.markdown("Un solo Excel (y un PDF) con todos los reportes del mes: comunas, bonificación, NS compromiso, "
-                    "NS ácido, NS por patente y sub-estados de no entrega.")
-        if st.button("Preparar reportes del mes", key="b_xls_mes"):
-            xls_m = excel_mensual({**dfs_m, **dfs_cal}, regs_m, anio_m, mes_m)
-            if xls_m is None:
-                st.warning("No hay datos para este mes.")
-                st.session_state.pop("excel_mes", None)
-                st.session_state.pop("pdf_mes", None)
-            else:
-                st.session_state["excel_mes"] = (xls_m, f"Reporte_Mensual_{anio_m}-{mes_m:02d}.xlsx")
-                st.session_state["pdf_mes"] = (pdf_mensual_completo(dfs_m, regs_m, anio_m, mes_m),
-                                               f"Reporte_Mensual_{anio_m}-{mes_m:02d}.pdf")
-        if "excel_mes" in st.session_state:
-            dt1, dt2 = st.columns(2)
-            dt1.download_button("📥 Descargar reporte mensual completo (Excel)", st.session_state["excel_mes"][0],
-                                file_name=st.session_state["excel_mes"][1], mime=XLSX, key="dl_mes_todo")
-            if "pdf_mes" in st.session_state:
-                dt2.download_button("📄 Descargar reporte mensual completo (PDF)", st.session_state["pdf_mes"][0],
-                                    file_name=st.session_state["pdf_mes"][1], mime="application/pdf",
-                                    key="dl_mes_todo_pdf")
-
-    # ----- Sub-estados de no entregados del mes (al final de la página) -----
-    st.markdown("---")
-    st.subheader("⚠️ Sub-estados de no entrega del mes")
-    if "subestados_noent" not in dfs_m:
-        st.info(sin_datos if not dfs_m else "Vuelve a presionar «Procesar mes» para ver los sub-estados de este mes.")
-    else:
-        se_no = dfs_m["subestados_noent"]
-        if se_no.empty:
-            st.info("No hubo órdenes no entregadas en el mes.")
-        else:
-            mostrar_df(se_no)
-            st.caption(f"Total de órdenes no entregadas: {int(se_no['Cantidad'].sum())} (solo Easy y París)")
-            ds1, ds2 = st.columns(2)
-            ds1.download_button("📥 Descargar sub-estados de no entrega en Excel",
-                                a_excel({"Sub-estados no entregados": se_no}),
-                                file_name=f"Subestados_no_entrega_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX,
-                                key="dl_subest_mes")
-            ds2.download_button("📄 Descargar sub-estados de no entrega en PDF", pdf_subestados(dfs_m, anio_m, mes_m),
-                                file_name=f"Subestados_no_entrega_{anio_m}-{mes_m:02d}.pdf", mime="application/pdf",
-                                key="dl_subest_pdf")
-
-    # ----- Calce París del mes -----
-    with sub[5]:
-        st.markdown("Compara el **BTK Yáñez** con el **BTK París** del mes (ambos con la fecha en la columna A). "
-                    "De cada orden se toma su último estado en cada sistema: las que siguen sin coincidir son las "
-                    "órdenes que **aún no se arreglan**.")
-        if st.button("Procesar calce París del mes", key="b_proc_calce_mes"):
-            a_y = resolver_mensual("btk_mensual", primer_m, up_btk_m)
-            a_p = resolver_mensual("btk_paris_mensual", primer_m, up_paris_m)
-            if a_y is None or a_p is None:
-                st.error("Faltan archivos: necesitas el BTK Yáñez del mes y el BTK París del mes.")
-            else:
-                try:
-                    with st.spinner("Cruzando los dos BTK del mes…"):
-                        y_mes = preparar_btk(_leer_cache(*a_y))
-                        meta_c, dfs_c = procesar_calce_mensual(y_mes, _leer_cache(*a_p), anio_m, mes_m)
-                        guardar_resultado("calce_mensual", primer_m, meta_c, dfs_c)
-                    st.success(f"¡Calce de {MESES[mes_m - 1]} de {anio_m} procesado!")
-                    mostrar_mapeos(meta_c)
-                    meta_cal, dfs_cal = meta_c, dfs_c
-                except Exception as e:  # noqa: BLE001
-                    st.error(f"No se pudo procesar el calce: {e}")
-        if not dfs_cal:
-            st.info("Todavía no hay calce de este mes. Sube los archivos y presiona «Procesar calce París del mes».")
-        else:
-            w1, w2, w3, w4 = st.columns(4)
-            w1.metric("Órdenes cruzadas", meta_cal["ordenes"])
-            w2.metric("Coinciden", meta_cal["coinciden"])
-            w3.metric("Aún sin arreglar", meta_cal["pendientes"])
-            w4.metric("% coincidencia", fmt_pct(meta_cal["pct_coincidencia"]))
-            if meta_cal.get("no_encontradas"):
-                st.warning(f"{meta_cal['no_encontradas']} orden(es) de Yáñez no aparecen en el BTK de París.")
-            if meta_cal.get("solo_paris"):
-                st.caption(f"Hay {meta_cal['solo_paris']} orden(es) en el BTK de París que no están en Yáñez "
-                           "(no se cruzan).")
-            pend = dfs_cal["calce_pendientes"]
-            st.subheader("🚨 Órdenes que aún no se arreglan")
-            if pend.empty:
-                st.success("✅ Todas las órdenes del mes coinciden.")
-            else:
-                mostrar_df(estilizar(pend, ["Estado Cruce"], "No Coincide", "Coincide"))
-                st.caption("Ordenadas de más a menos días sin arreglarse. La columna «Observación» queda vacía para "
-                           "que escribas tus notas en el Excel.")
-                c_a, c_b = st.columns(2)
-                with c_a:
-                    st.markdown("**Por diagnóstico**")
-                    mostrar_df(dfs_cal["calce_diagnostico"])
-                with c_b:
-                    st.markdown("**Por día (en que la orden apareció por primera vez en Yáñez)**")
-                    mostrar_df(dfs_cal["calce_dia"])
-                with st.expander("Combinaciones de sub-estados que no coinciden (para revisar las reglas)"):
-                    mostrar_df(dfs_cal["calce_combinaciones"])
-            with st.expander("Ver todas las órdenes cruzadas del mes"):
-                mostrar_df(estilizar(dfs_cal["calce_todas"], ["Estado Cruce"], "No Coincide", "Coincide"))
-            st.download_button("📥 Descargar calce París del mes en Excel",
-                               a_excel({"Pendientes": pend, "Todas las órdenes": dfs_cal["calce_todas"],
-                                        "Por día": dfs_cal["calce_dia"], "Diagnóstico": dfs_cal["calce_diagnostico"]}),
-                               file_name=f"Calce_Paris_{anio_m}-{mes_m:02d}.xlsx", mime=XLSX, key="dl_calce_mes")
-
-
-# ---------------------------------------------------------------------
-# TAB 8: CARGA DEL DÍA (bultos retirados por centro de distribución)
-# ---------------------------------------------------------------------
-with tabs[7]:
-    st.header("8. Carga del día")
+    st.header("7. Carga del día")
     st.markdown("Cantidad de **bultos retirados** en cada centro de distribución. Se ingresa a mano, un día a la vez.")
     dia_cg = st.date_input("Día", HOY, key="carga_dia")
     guardado_cg = cargar("carga", dia_cg, dia_cg)
@@ -4201,10 +4065,10 @@ with tabs[7]:
 
 
 # ---------------------------------------------------------------------
-# TAB 9: BITÁCORA DE PEDIDOS NO ENTREGADOS
+# TAB 8: BITÁCORA DE PEDIDOS NO ENTREGADOS
 # ---------------------------------------------------------------------
-with tabs[8]:
-    st.header("9. Bitácora de pedidos no entregados")
+with tabs[7]:
+    st.header("8. Bitácora de pedidos no entregados")
     st.caption("Trazabilidad de los no entregados: ingresas los números de orden de un día, la app trae del BTK "
                "de ese día los datos y los estados, y después va actualizando el estado actual con los BTK "
                "siguientes hasta que el pedido queda entregado o reingresado.")
@@ -4221,6 +4085,44 @@ with tabs[8]:
     f_bit = st.date_input("Fecha de los no entregados (vale para todo lo que ingreses ahora)", HOY, key="bf_fecha")
     up_bit = bloque_archivo("btk_yanez", "Archivo BTK YÁÑEZ de esa fecha (si aún no está guardado)", f_bit,
                             "u_btk_bit", "bf_fecha")
+
+    # Al subir el BTK, se guarda con su fecha y se completan solos los pedidos de ese día que esperaban sus datos
+    if up_bit is not None:
+        contenido_up = up_bit.getvalue()
+        firma_up = f"{up_bit.name}|{len(contenido_up)}|{f_bit.isoformat()}"
+        if st.session_state.get("bit_auto_firma") != firma_up:
+            fecha_arch = _fecha_de_archivo("btk_yanez", up_bit.name, contenido_up)
+            if fecha_arch and fecha_arch != f_bit:
+                st.error(f"El archivo parece ser del {fecha_arch:%d/%m/%Y} pero la fecha elegida es "
+                         f"{f_bit:%d/%m/%Y}. Corrige la fecha para que se complete la bitácora.")
+            else:
+                st.session_state["bit_auto_firma"] = firma_up
+                try:
+                    b_up = preparar_btk(leer_archivo(up_bit.name, contenido_up))
+                except Exception as e:  # noqa: BLE001
+                    b_up = None
+                    st.error("No pude leer este archivo como BTK de Yáñez, por eso no se completó nada: "
+                             f"{e}")
+                if b_up is not None:
+                    guardar_archivo("btk_yanez", f_bit, up_bit.name, contenido_up)
+                    bit, n_auto, no_enc_auto, entreg_auto = completar_bitacora(bit, b_up, f_bit)
+                    if n_auto:
+                        guardar_bitacora(bit)
+                    res_auto = actualizar_bitacora_guardada()
+                    bit = cargar_bitacora()
+                    texto_auto = f"BTK del {f_bit:%d/%m/%Y} guardado. "
+                    if n_auto:
+                        texto_auto += f"Se completaron {n_auto} pedido(s) de la bitácora con sus datos. "
+                    if res_auto and (res_auto["actualizadas"] or res_auto["finalizadas"]):
+                        texto_auto += (f"Estados al día: {res_auto['actualizadas']} actualizado(s), "
+                                       f"{res_auto['finalizadas']} finalizado(s).")
+                    st.success(texto_auto.strip())
+                    if no_enc_auto:
+                        st.warning("Estos pedidos siguen sin datos porque no están en ese BTK (revisa el número "
+                                   "o la fecha): " + ", ".join(no_enc_auto))
+                    if entreg_auto:
+                        st.warning("Figuran como entregadas/recogidas ese día en el BTK: " + ", ".join(entreg_auto)
+                                   + ". Quítalas de la bitácora si no corresponden.")
 
     if st.session_state.pop("bf_limpiar", False):  # después de guardar, el campo queda listo para la siguiente orden
         st.session_state["bf_guia"] = ""
@@ -4486,7 +4388,7 @@ with tabs[8]:
         if not sin_btk.empty:
             fechas_sin = ", ".join(sorted({_a_fecha(f_).strftime("%d/%m") for f_ in sin_btk["Fecha"]}))
             st.warning(f"⏳ {len(sin_btk)} pedido(s) esperan el BTK de su fecha ({fechas_sin}) para completar sus "
-                       "datos. Se completan solos al procesar ese BTK en la pestaña 1, o con «Completar con el BTK».")
+                       "datos. Se completan solos al subir el BTK de esa fecha arriba (o al procesarlo en la pestaña 1).")
 
         fmin, fmax = _a_fecha(bit["Fecha"].min()), _a_fecha(bit["Fecha"].max())
         fc1, fc2, fc3, fc4 = st.columns([1, 1, 1, 1.4])
