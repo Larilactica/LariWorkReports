@@ -30,7 +30,7 @@ st.set_page_config(
 DB_PATH = os.environ.get("YANEZ_DB", "reportes_yanez.db")
 
 # Se muestra en la barra lateral para saber qué versión del código está corriendo en Streamlit Cloud.
-APP_VERSION = "v16 · consolidado con NS ácido, gráficos y NS por patente"
+APP_VERSION = "v18 · tema rosa y dorado"
 
 # Cómo se busca cada columna: primero por el nombre del encabezado (exacto), luego por palabras que
 # contenga, y solo como último recurso por su posición (0 = columna A), validando que el contenido tenga sentido.
@@ -1385,6 +1385,23 @@ def procesar_calces(y, p_raw, fecha):
     return df.reset_index(drop=True), info
 
 
+def calces_ultima_fecha(df):
+    """Un pedido puede salir a ruta en más de una fecha (se reprograma y vuelve a salir). Cuando el cruce junta
+    varios días, de cada pedido se deja solo la comparación de la última fecha en que salió a ruta (dentro de los
+    días que se están mirando). Las filas repetidas dentro de una misma fecha no se tocan.
+    Devuelve (tabla, cantidad de filas de fechas anteriores que se quitaron)."""
+    if df is None or df.empty or not {"Fecha", "N° de pedido"} <= set(df.columns):
+        return df, 0
+    d = df.reset_index(drop=True)
+    fecha = pd.to_datetime(d["Fecha"], format="%d/%m/%Y", errors="coerce").fillna(pd.Timestamp.min)
+    orden = d["N° de pedido"].map(_norm_orden)
+    ultima = fecha.groupby(orden).transform("max")
+    quitar = orden.ne("") & fecha.lt(ultima)  # sin número de pedido no hay con qué comparar: se deja
+    d = d[~quitar].assign(_f=fecha[~quitar])
+    d = d.sort_values("_f", kind="stable").drop(columns="_f").reset_index(drop=True)
+    return d, int(quitar.sum())
+
+
 # =====================================================================
 # 5. SEMANAL / CONSOLIDADOS
 # =====================================================================
@@ -1751,7 +1768,7 @@ def excel_completo(f_ini, f_fin):
         hojas["Bonificación"] = bon
         hojas["Bonificación por patente"] = bonificacion_por_patente(bon)
     cal = cargar("calces", f_ini, f_fin)
-    dcal = concat_dfs(cal, "cruce")
+    dcal, _ = calces_ultima_fecha(concat_dfs(cal, "cruce"))
     if not dcal.empty:
         hojas["Calces París"] = dcal
     return a_excel(hojas) if hojas else None
@@ -3631,9 +3648,103 @@ def mostrar_semanal(f_ini, f_fin, clave="sem"):
 
 
 # =====================================================================
+# TEMA VISUAL
+# =====================================================================
+def estilo_app_html():
+    """Tema de la app (después de iniciar sesión): rosa y dorado, tipografía de revista y tarjetas suaves, como un
+    tablero de inspiración. Todo es CSS: si alguna regla no aplica en tu versión de Streamlit, la app se ve normal."""
+    css = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,700;0,800;1,500;1,700&family=Pinyon+Script&display=swap');
+:root{--rosa:#E8338A;--rosa2:#FF6FA8;--rosa-d:#B5135F;--borde:#F6CADB;--oro:#C9A24B;--tinta:#2B1B24;--suave:#7A6370}
+html{color-scheme:light}
+@keyframes subir{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@keyframes brillar{0%,100%{opacity:.55}50%{opacity:1}}
+.stApp{background:radial-gradient(rgba(232,51,138,.09) 1.3px,transparent 1.7px) 0 0/26px 26px,radial-gradient(900px 520px at 6% -6%,#FFD3E6 0%,transparent 62%),radial-gradient(820px 520px at 102% 2%,#FDE4C4 0%,transparent 58%),radial-gradient(760px 640px at 55% 112%,#F5D3F0 0%,transparent 62%),#FFF6F9 !important;color:var(--tinta);font-family:'DM Sans',system-ui,-apple-system,'Segoe UI',sans-serif}
+[data-testid="stAppViewContainer"],[data-testid="stMain"],.main,header[data-testid="stHeader"]{background:transparent !important}
+.block-container{padding-top:2.4rem !important}
+::selection{background:#FFC2DB;color:var(--tinta)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#F2A6C6;border-radius:10px}
+::-webkit-scrollbar-track{background:transparent}
+.stApp h1,.stApp h2,.stApp h3,.stApp h4{font-family:'Playfair Display',Georgia,'Times New Roman',serif !important;color:var(--tinta) !important;letter-spacing:-.2px}
+.stApp h2{font-weight:700 !important}
+.stApp h2::after{content:"";display:block;width:84px;height:3px;margin-top:8px;border-radius:3px;background:linear-gradient(90deg,var(--rosa),var(--oro))}
+.stApp h3{font-style:italic;font-weight:600 !important;color:var(--rosa-d) !important}
+.stApp [data-testid="stMarkdownContainer"] p,.stApp [data-testid="stMarkdownContainer"] li{color:var(--tinta)}
+.stApp [data-testid="stCaptionContainer"],.stApp [data-testid="stCaptionContainer"] p{color:var(--suave) !important}
+.stApp [data-testid="stWidgetLabel"] p{color:#5A3347;font-weight:600}
+.stApp hr{border:none !important;height:2px !important;background:linear-gradient(90deg,transparent,var(--rosa),var(--oro),transparent) !important;opacity:.55}
+.sc-hero{position:relative;display:flex;align-items:center;justify-content:space-between;gap:28px;padding:26px 36px;margin:0 0 20px;background:linear-gradient(135deg,rgba(255,255,255,.94),rgba(255,238,245,.90));border:1px solid var(--borde);border-radius:30px;box-shadow:0 18px 44px rgba(181,19,95,.12),inset 0 0 0 5px rgba(255,255,255,.75);overflow:hidden;animation:subir .6s ease both}
+.sc-hero::before{content:"";position:absolute;inset:8px;border:1px solid rgba(201,162,75,.55);border-radius:24px;pointer-events:none}
+.sc-hero-txt{position:relative;z-index:1}
+.sc-script{font-family:'Pinyon Script','Snell Roundhand','Brush Script MT',cursive;font-size:2.1rem;color:var(--rosa) !important;line-height:1;margin:0 0 4px !important}
+.sc-hero h1{font-family:'Playfair Display',Georgia,serif !important;font-weight:800 !important;font-size:clamp(1.8rem,3.4vw,2.9rem) !important;line-height:1.08 !important;margin:.1rem 0 .45rem !important;padding:0 !important;color:var(--tinta) !important}
+.sc-hero h1 em{color:var(--rosa);font-style:italic}
+.sc-sub{letter-spacing:.28em;text-transform:uppercase;font-size:.72rem;color:var(--oro);font-weight:700}
+.pins{position:relative;z-index:1;display:grid;grid-template-columns:repeat(3,68px);grid-auto-rows:30px;gap:10px;flex:none}
+.pin{display:flex;align-items:center;justify-content:center;font-size:1.7rem;border-radius:16px;box-shadow:0 8px 18px rgba(181,19,95,.18);border:2px solid rgba(255,255,255,.85);transition:transform .25s ease;animation:subir .7s ease both}
+.pin:hover{transform:translateY(-4px) rotate(-3deg) scale(1.06)}
+.p1{grid-column:1;grid-row:1/4;background:linear-gradient(160deg,#FFB3D1,#FF7FB0);transform:rotate(-2deg)}
+.p2{grid-column:2;grid-row:1/3;background:linear-gradient(160deg,#FFE7B8,#F4C96B);transform:rotate(1.5deg)}
+.p3{grid-column:3;grid-row:1/4;background:linear-gradient(160deg,#E9D2FF,#C9A6F5);transform:rotate(2deg)}
+.p4{grid-column:1;grid-row:4/6;background:linear-gradient(160deg,#FFD9C2,#FFAE8A);transform:rotate(1.5deg)}
+.p5{grid-column:2;grid-row:3/6;background:linear-gradient(160deg,#FFC2DB,#F2559E);transform:rotate(-1.5deg)}
+.p6{grid-column:3;grid-row:4/6;background:linear-gradient(160deg,#FFF0C9,#E8C873);transform:rotate(-2deg)}
+button[data-baseweb="tab"]{background:#fff !important;border:1px solid var(--borde) !important;border-radius:999px !important;padding:8px 18px !important;height:auto !important;box-shadow:0 3px 10px rgba(232,51,138,.08);transition:transform .18s ease,box-shadow .18s ease,background .18s ease}
+button[data-baseweb="tab"]:hover{transform:translateY(-2px);background:#FFF0F6 !important;box-shadow:0 8px 18px rgba(232,51,138,.16)}
+button[data-baseweb="tab"] p{color:#6B3A52 !important;font-weight:600 !important;font-size:.92rem !important}
+button[data-baseweb="tab"][aria-selected="true"]{background:linear-gradient(135deg,var(--rosa),var(--rosa2)) !important;border-color:transparent !important;box-shadow:0 10px 22px rgba(232,51,138,.38)}
+button[data-baseweb="tab"][aria-selected="true"] p{color:#fff !important}
+[data-baseweb="tab-list"],[role="tablist"]{gap:8px !important;flex-wrap:wrap !important;border-bottom:none !important;padding:4px 0 12px}
+[data-baseweb="tab-highlight"],[data-baseweb="tab-border"]{display:none !important}
+[data-testid="stMetric"]{position:relative;overflow:hidden;background:#fff;border:1px solid var(--borde);border-radius:22px;padding:14px 18px 12px 24px;box-shadow:0 8px 22px rgba(181,19,95,.08);transition:transform .2s ease,box-shadow .2s ease}
+[data-testid="stMetric"]::before{content:"";position:absolute;left:0;top:0;bottom:0;width:6px;background:linear-gradient(180deg,var(--rosa),var(--oro))}
+[data-testid="stMetric"]:hover{transform:translateY(-3px);box-shadow:0 16px 32px rgba(181,19,95,.16)}
+[data-testid="stMetricLabel"] p{font-size:.76rem !important;letter-spacing:.08em;text-transform:uppercase;color:var(--suave) !important;font-weight:700 !important}
+[data-testid="stMetricValue"],[data-testid="stMetricValue"] div{font-family:'Playfair Display',Georgia,serif !important;color:var(--rosa-d) !important;font-weight:700 !important}
+.stApp [data-testid^="stBaseButton-secondary"],.stApp [data-testid^="stBaseButton-primary"],.stApp .stButton>button,.stApp [data-testid="stFormSubmitButton"]>button{background:linear-gradient(135deg,var(--rosa),var(--rosa2)) !important;color:#fff !important;border:none !important;border-radius:999px !important;padding:.5rem 1.4rem !important;font-weight:600 !important;box-shadow:0 8px 18px rgba(232,51,138,.30) !important;transition:transform .18s ease,box-shadow .18s ease,filter .18s ease}
+.stApp [data-testid^="stBaseButton-secondary"]:hover,.stApp [data-testid^="stBaseButton-primary"]:hover,.stApp .stButton>button:hover,.stApp [data-testid="stFormSubmitButton"]>button:hover{transform:translateY(-2px);box-shadow:0 14px 26px rgba(232,51,138,.42) !important;filter:brightness(1.05)}
+.stApp [data-testid^="stBaseButton-secondary"] p,.stApp [data-testid^="stBaseButton-primary"] p,.stApp .stButton>button p,.stApp [data-testid="stFormSubmitButton"]>button p{color:#fff !important;font-weight:600 !important}
+.stApp [data-testid^="stBaseButton"]:disabled,.stApp .stButton>button:disabled{opacity:.45;filter:grayscale(.35);box-shadow:none !important;transform:none}
+.stApp [data-testid="stDownloadButton"] button,.stApp .stDownloadButton>button{background:linear-gradient(135deg,#C9A24B,#EBCB7E) !important;box-shadow:0 8px 18px rgba(201,162,75,.38) !important}
+.stApp [data-testid="stDownloadButton"] button p,.stApp .stDownloadButton>button p{color:#3A2A0E !important}
+.stApp [data-baseweb="input"],.stApp [data-baseweb="base-input"],.stApp [data-baseweb="select"]>div,.stApp [data-baseweb="textarea"]{border-radius:14px !important;border-color:var(--borde) !important;background-color:#fff !important}
+.stApp [data-baseweb="input"]:focus-within,.stApp [data-baseweb="select"]>div:focus-within,.stApp [data-baseweb="textarea"]:focus-within{border-color:var(--rosa) !important;box-shadow:0 0 0 3px rgba(232,51,138,.16) !important}
+[data-testid="stExpander"]{border-radius:20px !important;overflow:hidden;box-shadow:0 6px 18px rgba(181,19,95,.07);background:rgba(255,255,255,.86)}
+[data-testid="stExpander"] details{border:1px solid var(--borde) !important;border-radius:20px !important;background:transparent !important}
+[data-testid="stExpander"] summary{font-weight:600}
+[data-testid="stExpander"] summary p{color:var(--rosa-d) !important;font-weight:600 !important}
+[data-testid="stDataFrame"],[data-testid="stTable"]{border:1px solid var(--borde);border-radius:18px;overflow:hidden;box-shadow:0 8px 22px rgba(181,19,95,.08)}
+[data-testid="stFileUploaderDropzone"]{background:linear-gradient(135deg,#FFF0F6,#FFF8EC) !important;border:2px dashed #F08CB6 !important;border-radius:22px !important}
+[data-testid="stForm"]{background:rgba(255,255,255,.88) !important;border:1px solid var(--borde) !important;border-radius:24px !important;box-shadow:0 10px 26px rgba(181,19,95,.08)}
+[data-testid="stAlert"]{border-radius:18px !important;box-shadow:0 6px 16px rgba(0,0,0,.05)}
+[data-testid="stAlert"]>div{border-radius:18px !important}
+[data-testid="stSidebar"]{background:linear-gradient(180deg,#FFDDEA 0%,#FFF1F6 55%,#FBE8CF 100%) !important;border-right:1px solid var(--borde)}
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p{color:#5A3347 !important}
+.sb-card{margin:2px 0 14px;padding:16px 16px 14px;text-align:center;background:rgba(255,255,255,.75);border:1px solid var(--borde);border-radius:22px;box-shadow:0 8px 20px rgba(181,19,95,.10)}
+.sb-script{font-family:'Pinyon Script','Snell Roundhand','Brush Script MT',cursive;font-size:1.9rem;line-height:1;color:var(--rosa)}
+.sb-t{margin-top:4px;font-size:.66rem;letter-spacing:.22em;text-transform:uppercase;color:var(--oro);font-weight:700}
+@media (max-width:900px){.pins{display:none}.sc-hero{padding:20px 22px}}
+</style>"""
+    hero = """
+<div class="sc-hero"><div class="sc-hero-txt"><p class="sc-script">Hello, Larissa ✨</p>
+<h1>Suite de Reportes <em>Operativos</em></h1>
+<div class="sc-sub">Transportes Yáñez · Logística con estilo</div></div>
+<div class="pins"><div class="pin p1">👠</div><div class="pin p2">🍸</div><div class="pin p3">🗽</div><div class="pin p4">💄</div><div class="pin p5">🌸</div><div class="pin p6">👜</div></div></div>"""
+    # una sola línea: Streamlit interpreta las líneas en blanco o con sangría como texto, no como HTML
+    return "".join(linea.strip() for linea in (css + hero).splitlines())
+
+
+def tarjeta_sidebar_html():
+    return ('<div class="sb-card"><div class="sb-script">Coordinación</div>'
+            '<div class="sb-t">Logística · Easy &amp; París</div></div>')
+
+
+# =====================================================================
 # PÁGINA
 # =====================================================================
-st.title("🚚 Suite de Reportes Operativos - Transportes Yáñez")
+st.markdown(estilo_app_html(), unsafe_allow_html=True)
 if "aviso_limpieza" in st.session_state:
     _corte, _na, _nr = st.session_state["aviso_limpieza"]
     st.info(f"🧹 Limpieza automática: se borró todo lo anterior al {_corte:%d/%m/%Y} "
@@ -3645,6 +3756,7 @@ if _prox_limpieza and 0 <= (_prox_limpieza[0] - HOY).days <= 7:
     st.warning(f"📅 El {_prox_limpieza[0]:%d/%m/%Y} se borrarán todos los datos anteriores al "
                f"{_prox_limpieza[1]:%d/%m/%Y}. Antes de esa fecha descarga tus reportes del mes y una copia de "
                "seguridad (pestaña 6).")
+st.sidebar.markdown(tarjeta_sidebar_html(), unsafe_allow_html=True)
 if st.sidebar.button("Cerrar sesión"):
     st.session_state["password_correct"] = False
     st.rerun()
@@ -3858,10 +3970,14 @@ with tabs[3]:
     st.subheader("🔍 Consultar Cruce de Calces por Rango de Fechas")
     rango_cal = selector_rango("cal")
     if rango_cal:
-        df_cal_all = concat_dfs(cargar("calces", *rango_cal), "cruce")
+        df_cal_all, n_repetidas = calces_ultima_fecha(concat_dfs(cargar("calces", *rango_cal), "cruce"))
         if df_cal_all.empty:
             st.warning("No hay registros de calces en el rango seleccionado.")
         else:
+            if n_repetidas:
+                st.info(f"🔁 {n_repetidas} fila(s) de pedidos que salieron a ruta en más de una fecha quedaron fuera: "
+                        "de cada pedido solo se muestra la comparación de la última fecha en que salió "
+                        "(dentro del rango elegido).")
             total = len(df_cal_all)
             no_coin = int((df_cal_all["Estado Cruce"] == "No Coincide").sum())
             q1, q2, q3 = st.columns(3)
